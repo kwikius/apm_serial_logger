@@ -40,7 +40,7 @@ EEPROM_PATH = $(ARDUINO_PATH)libraries/EEPROM/
 #arduino_cpp_objects = CDC.o HardwareSerial.o Print.o Stream.o  WString.o main.o new.o 
 arduino_cpp_objects = CDC.o  Print.o main.o new.o
 arduino_c_objects = WInterrupts.o wiring.o wiring_digital.o
-local_objects = apm_log.o setup.o loop.o
+local_objects = apm_log.o setup.o loop.o settings.o
 sdfat_objects = istream.o  Sd2Card.o     SdFat.o      SdFile.o    SdVolume.o \
 ostream.o  SdBaseFile.o  SdFatUtil.o  SdStream.o
 

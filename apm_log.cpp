@@ -17,8 +17,9 @@
 
 
 #include "log.h"
+#include "settings.h"
 
-SerialPort<0, 750, 0> NewSerial;
+serial_port_t NewSerial;
 //SerialPort<0, 680, 0> NewSerial;
 //SerialPort<0, 580, 0> NewSerial;
 //This is a very important buffer declaration. This sets the <port #, rx size, tx size>. We set
@@ -60,24 +61,6 @@ char folderTree[FOLDER_TRACK_DEPTH][12];
 #define SEQ_FILENAME "SEQLOG00.TXT" //This is the name for the file when you're in sequential mode
 
 //Internal EEPROM locations for the user settings
-#define LOCATION_SYSTEM_SETTING		0x02
-#define LOCATION_FILE_NUMBER_LSB	0x03
-#define LOCATION_FILE_NUMBER_MSB	0x04
-#define LOCATION_ESCAPE_CHAR		0x05
-#define LOCATION_MAX_ESCAPE_CHAR	0x06
-#define LOCATION_VERBOSE                0x07
-#define LOCATION_ECHO                   0x08
-#define LOCATION_BAUD_SETTING_HIGH	0x09
-#define LOCATION_BAUD_SETTING_MID	0x0A
-#define LOCATION_BAUD_SETTING_LOW	0x0B
-#define LOCATION_IGNORE_RX		0x0C
-
-#define BAUD_MIN  300
-#define BAUD_MAX  1000000
-
-#define MODE_NEWLOG	0
-#define MODE_SEQLOG     1
-#define MODE_COMMAND    2
 
 //STAT1 is a general LED and indicates serial traffic
 #define STAT1  5 //On PORTD
@@ -102,10 +85,7 @@ const byte statled2 = 13; //This is the SPI LED, indicating SD traffic
 #endif
 
 //These are bit locations used when testing for simple embedded commands.
-#define ECHO			0x01
-#define EXTENDED_INFO		0x02
-#define OFF  0x00
-#define ON   0x01
+
 
 #ifdef INCLUDE_SIMPLE_EMBEDDED
 #define EMBEDDED_END_MARKER	0x08
@@ -115,13 +95,13 @@ Sd2Card card;
 SdVolume volume;
 SdFile currentDirectory;
 
-long setting_uart_speed; //This is the baud rate that the system runs at, default is 9600. Can be 1,200 to 1,000,000
-byte setting_system_mode; //This is the mode the system runs in, default is MODE_NEWLOG
-byte setting_escape_character; //This is the ASCII character we look for to break logging, default is ctrl+z
-byte setting_max_escape_character; //Number of escape chars before break logging, default is 3
-byte setting_verbose; //This controls the whether we get extended or simple responses.
-byte setting_echo; //This turns on/off echoing at the command prompt
-byte setting_ignore_RX; //This flag, when set to 1 will make OpenLog ignore the state of the RX pin when powering up
+long setting_uart_speed = 9600; //This is the baud rate that the system runs at, default is 9600. Can be 1,200 to 1,000,000
+byte setting_system_mode = MODE_NEWLOG; //This is the mode the system runs in, default is MODE_NEWLOG
+byte setting_escape_character = 0x1a; //This is the ASCII character we look for to break logging, default is ctrl+z
+byte setting_max_escape_character = 3; //Number of escape chars before break logging, default is 3
+byte setting_verbose = 1; //This controls the whether we get extended or simple responses.
+byte setting_echo = 1; //This turns on/off echoing at the command prompt
+byte setting_ignore_RX = 0; //This flag, when set to 1 will make OpenLog ignore the state of the RX pin when powering up
 
 //The number of command line arguments
 //Increase to support more arguments but be aware of the memory restrictions
@@ -639,6 +619,7 @@ void set_default_settings(void)
   //We can't do it here because we are not sure the FAT system is init'd
 }
 
+#if 0
 //Reads the current system settings from EEPROM
 //If anything looks weird, reset setting to default value
 void read_system_settings(void)
@@ -718,6 +699,7 @@ void read_system_settings(void)
     EEPROM.write(LOCATION_IGNORE_RX, setting_ignore_RX);
   }
 }
+#endif
 
 void read_config_file(void)
 {
@@ -993,31 +975,8 @@ void record_config_file(void)
   //Now that the new config file has the current system settings, nothing else to do!
 }
 
-//Given a baud rate (long number = four bytes but we only use three), record to EEPROM
-void writeBaud(long uartRate)
-{
-  EEPROM.write(LOCATION_BAUD_SETTING_HIGH, (byte)((uartRate & 0x00FF0000) >> 16));
-  EEPROM.write(LOCATION_BAUD_SETTING_MID, (byte)(uartRate >> 8));
-  EEPROM.write(LOCATION_BAUD_SETTING_LOW, (byte)uartRate);
-}
-
-//Look up the baud rate. This requires three bytes be combined into one long
-long readBaud(void)
-{
-  byte uartSpeedHigh = EEPROM.read(LOCATION_BAUD_SETTING_HIGH);
-  byte uartSpeedMid = EEPROM.read(LOCATION_BAUD_SETTING_MID);
-  byte uartSpeedLow = EEPROM.read(LOCATION_BAUD_SETTING_LOW);
-
-  //long uartSpeed = 0x00FF0000 & ((long)uartSpeedHigh << 16) | ((long)uartSpeedMid << 8) | uartSpeedLow; //Combine the three bytes
-  long uartSpeed =  ((long)uartSpeedHigh << 16) | ((long)uartSpeedMid << 8) | ((long)uartSpeedLow); //Combine the three bytes
-  return(uartSpeed); 
-}
-
-
 //End core system functions
 //=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-
 void command_shell(void)
 {
   //Provide a simple shell

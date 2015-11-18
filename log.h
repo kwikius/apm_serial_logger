@@ -37,7 +37,9 @@ unsigned char lsPrintNext(SdFile * theDir, char * cmdStr, unsigned char flags, u
 signed char getNextFolderTreeIndex();
 void printRam() ;
 void systemError(byte error_type);
-extern SerialPort<0, 750, 0> NewSerial;
+
+typedef SerialPort<0, 250, 0> serial_port_t;
+extern  serial_port_t NewSerial;
 
 extern Sd2Card card;
 extern SdVolume volume;
