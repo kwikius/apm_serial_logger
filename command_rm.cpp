@@ -1,4 +1,7 @@
-
+    //NOTE on using "rm <option>/<file> <subfolder>"
+    // "rm -rf <subfolder>" removes the <subfolder> and all contents recursively
+    // "rm <subfolder>" removes the <subfolder> only if its empty
+    // "rm <filename>" removes the <filename>
 //-------------------------------------------------------------
 byte command_rm()
 {

@@ -153,22 +153,22 @@ byte command_md()
        NewSerial.println(command_arg);
      }
      return 0;
-   }
-   else
-   {
+   }else{
      return 1;
    }
 }
 #include "command_rm.cpp"
 #include "command_read.cpp"
 #include "command_write.cpp"
+#include "command_size.cpp"
+#include "command_cd.cpp"
 
 void command_shell(void)
 {
   //Provide a simple shell
   char buffer[30];
-  byte tmp_var;
-  SdFile tempFile;
+ // byte tmp_var;
+ // SdFile tempFile;
   byte command_succeeded = 1;
 #if RAM_TESTING == 1
   printRam(); //Print the available RAM
@@ -207,23 +207,21 @@ void command_shell(void)
       command_succeeded = command_md();
     }
 //----------------------------------------------------------
-    //NOTE on using "rm <option>/<file> <subfolder>"
-    // "rm -rf <subfolder>" removes the <subfolder> and all contents recursively
-    // "rm <subfolder>" removes the <subfolder> only if its empty
-    // "rm <filename>" removes the <filename>
     else if(strcmp_P(command_arg, PSTR("rm")) == 0) {
       command_succeeded = command_rm();
     }
 //----------------------------------------------------------------------
     else if(strcmp_P(command_arg, PSTR("cd")) == 0){
+#if 0
       //Argument 2: Directory name
       command_arg = get_cmd_arg(1);
       if(command_arg == 0){
         continue;
       }
-      //open directory
-      tmp_var = gotoDir(command_arg);
-      command_succeeded = tmp_var;
+      command_succeeded = gotoDir(command_arg);
+#else
+      command_succeeded = command_cd();
+#endif
     }
 //---------------------------------------------------------
     else if(strcmp_P(command_arg, PSTR("read")) == 0) {
@@ -231,103 +229,11 @@ void command_shell(void)
     }
 //--------------------------------------------------------------------
     else if(strcmp_P(command_arg, PSTR("write")) == 0){
-#if 0
-      //Argument 2: File name
-      command_arg = get_cmd_arg(1);
-      if(command_arg == 0)
-        continue;
-
-      //search file in current directory and open it
-      if (!tempFile.open(&currentDirectory, command_arg, O_WRITE)) {
-        if ((feedback_mode & setting::extended_info) > 0) {
-          NewSerial.print(F("Failed to open file "));
-          NewSerial.println(command_arg);
-        }
-        continue;
-      }
-
-      //Argument 3: File seek position
-      if ((command_arg = get_cmd_arg(2)) != 0){
-        if (is_number(command_arg, strlen(command_arg))) {
-          int32_t offset = strtolong(command_arg);
-          if(!tempFile.seekSet(offset)) {
-            if ((feedback_mode & setting::extended_info) > 0)
-            {
-              NewSerial.print(F("Error seeking to "));
-              NewSerial.println(command_arg);
-            }
-            tempFile.close();
-            continue;
-          }
-        }
-      }
-      //read text from the shell and write it to the file
-      byte dataLen;
-      while(1) {
-        if ((feedback_mode & setting::end_marker) > 0){
-          NewSerial.print((char)0x1A); // Ctrl+Z ends the data and marks the start of result
-        }
-        NewSerial.print(F("<")); //give a different prompt
-
-        //read one line of text
-        dataLen = read_line(buffer, sizeof(buffer));
-        if(!dataLen) {
-//#ifdef INCLUDE_SIMPLE_EMBEDDED
-          command_succeeded = 1;
-//#endif
-          break;
-        }
-        
-        //If we see the escape character at the end of the buffer then record up to
-        //that point in the buffer excluding the escape char
-        //See issue 168: https://github.com/sparkfun/OpenLog/issues/168
-        /*if(buffer[dataLen] == setting::escape_character)
-        {
-          //dataLen -= 1; //Adjust dataLen to remove the escape char
-          tempFile.write((byte*) buffer, dataLen); //write text to file
-          break; //Quit recording to file
-        }*/
-
-        //write text to file
-        if(tempFile.write((byte*) buffer, dataLen) != dataLen) {
-          if ((feedback_mode & setting::extended_info) > 0)
-            NewSerial.print(F("error writing to file\n\r"));
-          break;
-        }
-        //If we didn't fill up the buffer then user must have sent NL. Append new line and return
-        if(dataLen < (sizeof(buffer) - 1)) tempFile.write("\n\r", 2); 
-        
-      }
-
-      tempFile.close();
-#else
       command_succeeded = command_write(buffer, sizeof(buffer));
-#endif
     }
 //-------------------------------------------------------
     else if(strcmp_P(command_arg, PSTR("size")) == 0) {
-      //Argument 2: File name - no wildcard search
-      command_arg = get_cmd_arg(1);
-      if(command_arg == 0)
-        continue;
-
-      //search file in current directory and open it
-      if (tempFile.open(&currentDirectory, command_arg, O_READ)) {
-        NewSerial.print(tempFile.fileSize());
-        tempFile.close();
-//#ifdef INCLUDE_SIMPLE_EMBEDDED
-        command_succeeded = 1;
-//#endif
-      }
-      else
-      {
-        if ((feedback_mode & setting::extended_info) > 0)
-          NewSerial.print(F("-1")); //Indicate no file is found
-      }
-//#ifdef INCLUDE_SIMPLE_EMBEDDED
-      if ((feedback_mode & setting::end_marker) == 0)
-//#endif
-        NewSerial.println();
+       command_succeeded = command_size();
     }
 //----------------------------------------------------------
     else if(strcmp_P(command_arg, PSTR("disk")) == 0) {
@@ -392,24 +298,12 @@ void command_shell(void)
       //7761920 = 8GB card
       //994816 = 1GB card
       NewSerial.println(F(" KB"));
-//#ifdef INCLUDE_SIMPLE_EMBEDDED
       command_succeeded = 1;
-//#endif
-    }
-//--------------------------------------------------------
-    else if(strcmp_P(command_arg, PSTR("sync")) == 0){
-      //Flush all current data and record it to card
-      //This isn't really tested.
-      tempFile.sync();
-      currentDirectory.sync();
-//#ifdef INCLUDE_SIMPLE_EMBEDDED
-      command_succeeded = 1;
-//#endif
+
     }
 //--------------------------RESET--------------------------
     //Reset the AVR
-    else if(strcmp_P(command_arg, PSTR("reset")) == 0)
-    {
+    else if(strcmp_P(command_arg, PSTR("reset")) == 0) {
       Reset_AVR();
     }
 //--------------------------NEW -----------------------------
@@ -417,18 +311,15 @@ void command_shell(void)
     else if(strcmp_P(command_arg, PSTR("new")) == 0) {
       //Argument 2: File name
       command_arg = get_cmd_arg(1);
-      if(command_arg == 0)
+      if(command_arg == 0){
         continue;
-
+      }
+      SdFile tempFile;
       //Try to open file, if fail (file doesn't exist), then break
       if (tempFile.open(&currentDirectory, command_arg, O_CREAT | O_EXCL | O_WRITE)) {//Will fail if file already exsists
         tempFile.close(); //Everything is good, Close this new file we just opened
-//#ifdef INCLUDE_SIMPLE_EMBEDDED
         command_succeeded = 1;
-//#endif
-      }
-      else
-      {
+      }else{
         if ((feedback_mode & setting::extended_info) > 0) {
           NewSerial.print(F("Error creating file: "));
           NewSerial.println(command_arg);
@@ -451,11 +342,12 @@ void command_shell(void)
 //---------------------------------------------------------
     else if(strcmp_P(command_arg, PSTR("pwd")) == 0) {
       NewSerial.print(F(".\\"));
-      tmp_var = getNextFolderTreeIndex();
-      for (byte i = 0; i < tmp_var; i++)
-      {
-        NewSerial.print(folderTree[i]);
-        if (i < tmp_var-1) NewSerial.print(F("\\"));
+      byte const tmp_var = getNextFolderTreeIndex();
+      for (byte i = 0; i < tmp_var; i++){
+         NewSerial.print(folderTree[i]);
+         if (i < tmp_var-1) {
+            NewSerial.print(F("\\"));
+         }
       }
       NewSerial.println();
       command_succeeded = 1;
@@ -512,7 +404,7 @@ byte read_line(char* buffer, byte buffer_length)
       break;
     }
     else if (c == '\n') {
-      NewSerial.print("Newline\n");
+      //NewSerial.print("Newline\n");
       //Do nothing - ignore newlines
       //This was added to v2.51 to make command line control easier from a micro
       //You never know what fprintf or sprintf is going to throw at the buffer
@@ -588,18 +480,13 @@ byte gotoDir(const char *dir)
       NewSerial.print(F("cannot cd to parent directory: "));
       NewSerial.println(dir);
     }
-  }
-  else
-  {
+  }else {
     if (!(tmp_var = subDirectory.open(&currentDirectory, dir, O_READ))) {
-      if ((feedback_mode & setting::extended_info) > 0)
-      {
+      if ((feedback_mode & setting::extended_info) > 0){
         NewSerial.print(F("directory not found: "));
         NewSerial.println(dir);
       }
-    }
-    else
-    {
+    }else {
       currentDirectory = subDirectory; //Point to new directory
       int8_t index = getNextFolderTreeIndex();
       if (index >= 0)
@@ -644,10 +531,11 @@ byte count_cmd_args(void)
 {
   byte count = 0;
  
-  for( byte i = 0; i < setting::max_commandline_args; i++)
-    if((cmd_arg[i].arg != 0) && (cmd_arg[i].arg_length > 0))
+  for( byte i = 0; i < setting::max_commandline_args; i++){
+    if((cmd_arg[i].arg != 0) && (cmd_arg[i].arg_length > 0)){
       count++;
-
+    }
+  }
   return count;
 }
 
@@ -736,43 +624,34 @@ byte wildcmp(const char* wild, const char* string)
   const char *cp = 0;
   const char *mp = 0;
 
-  while (*string && (*wild != '*'))
-  {
-    if ((*wild != *string) && (*wild != '?'))
+  while (*string && (*wild != '*')) {
+    if ((*wild != *string) && (*wild != '?')){
       return 0;
-
+    }
     wild++;
     string++;
   }
 
-  while (*string)
-  {
-    if (*wild == '*')
-    {
-      if (!(*(++wild)))
+  while (*string) {
+    if (*wild == '*'){
+      if (!(*(++wild))){
         return 1;
-
+      }
       mp = wild;
       cp = string+1;
-    }
-    else if ((*wild == *string) || (*wild== '?'))
-    {
+    }else if ((*wild == *string) || (*wild== '?')) {
       wild++;
       string++;
-    }
-    else
-    {
+    }else{
       wild = mp;
       string = cp++;
     }
   }
-
-  while (*wild == '*')
+  while (*wild == '*'){
     wild++;
+  }
   return !(*wild);
 }
-
-
 
 #include "lsprint.cpp"
 
