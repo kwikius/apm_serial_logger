@@ -40,7 +40,7 @@ EEPROM_PATH = $(ARDUINO_PATH)libraries/EEPROM/
 #arduino_cpp_objects = CDC.o HardwareSerial.o Print.o Stream.o  WString.o main.o new.o 
 arduino_cpp_objects = CDC.o  Print.o main.o new.o
 arduino_c_objects = WInterrupts.o wiring.o wiring_digital.o
-local_objects = apm_log.o setup.o loop.o settings.o
+local_objects = apm_log.o
 sdfat_objects = istream.o  Sd2Card.o     SdFat.o      SdFile.o    SdVolume.o \
 ostream.o  SdBaseFile.o  SdFatUtil.o  SdStream.o
 
@@ -68,7 +68,7 @@ CFLAGS_C = -Wall -mmcu=$(ARDUINO_MCU) $(INCLUDES) -ffunction-sections -fdata-sec
 
 CFLAGS_CPP = $(CFLAGS_C) --std=c++11 -fno-rtti -fno-exceptions 
 
-MAPFILE =  $(OUTPUT_FILENAME).map
+MAPFILE =  $(ELFFILE).map
 
 LFLAGS = -mmcu=$(ARDUINO_MCU) -Wl,-Map=$(MAPFILE),--cref -Wl,--gc-sections -Wl,-u,vfprintf -lprintf_flt -lm -s
 
@@ -99,7 +99,7 @@ $(local_objects) : %.o : %.cpp
 
 $(ELFFILE) : $(OBJECTS)
 	$(CC) -o $@ $(LFLAGS) $(OBJECTS)
-
+	$(SIZ) -A $(ELFFILE)
 
 eeprom.o : $(EEPROM_PATH)EEPROM.cpp
 	$(CC) $(CFLAGS_CPP) -c $< -o $@

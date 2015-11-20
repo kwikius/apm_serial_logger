@@ -1,8 +1,4 @@
 /*
- Fork of OpenLog based on Based on OpenLog by SparkFun'
-*/
-
-/*
  12-3-09
  Nathan Seidle
  SparkFun Electronics 2012
@@ -10,114 +6,90 @@
  OpenLog hardware and firmware are released under the Creative Commons Share Alike v3.0 license.
  http://creativecommons.org/licenses/by-sa/3.0/
  Feel free to use, distribute, and sell varients of OpenLog. 
-
- All we ask is that you include attribution of 'Based on OpenLog by SparkFun'.
-
+All we ask is that you include attribution of 'Based on OpenLog by SparkFun'.
+ 
  */
 
-
-#include "log.h"
-#include "settings.h"
-
-serial_port_t NewSerial;
-//SerialPort<0, 680, 0> NewSerial;
-//SerialPort<0, 580, 0> NewSerial;
-//This is a very important buffer declaration. This sets the <port #, rx size, tx size>. We set
-//the TX buffer to zero because we will be spending most of our time needing to buffer the incoming (RX) characters.
-//900 works on minimal implementation, doesn't work with the full command prompt
-//850 fails on echo on/off
-//800 works with full command shell
-//700 works very well at 115200
-//600 works well at 115200
+#include <SdFat.h> //We do not use the built-in SD.h file because it calls Serial.print
+#include <SerialPort.h> //This is a new/beta library written by Bill Greiman. You rock Bill!
+#include <EEPROM.h>
 
 #include <avr/sleep.h> //Needed for sleep_mode
 #include <avr/power.h> //Needed for powering down perihperals such as the ADC/TWI and Timers
-//#include <avr/wdt.h> //Needed for the reset command - uses watch dog timer to reset IC
+#include "log.h"
 
-//Debug turns on (1) or off (0) a bunch of verbose debug statements. Normally use (0)
-//#define DEBUG  1
-#define DEBUG  0
+namespace {
+   SerialPort<0, 250, 0> NewSerial;
+   #define DEBUG  0
 
-//The bigger the receive buffer, the less likely we are to drop characters at high speed. However, the ATmega has a limited amount of
-//RAM. This debug mode allows us to view available RAM at various stages of the program
-//#define RAM_TESTING  1 //On
-#define RAM_TESTING  0 //Off
+   //#define RAM_TESTING  1 //On
+   #define RAM_TESTING  0 //Off
 
-//#define Reset_AVR() wdt_enable(WDTO_1S); while(1) {} //Correct way of resetting the ATmega, but doesn't work with 
-//Arduino pre-Optiboot bootloader
-void(* Reset_AVR) (void) = 0; //Dirty way of resetting the ATmega, but it works for now
+   //#define Reset_AVR() wdt_enable(WDTO_1S); while(1) {} //Correct way of resetting the ATmega, but doesn't work with 
+   //Arduino pre-Optiboot bootloader
+   void(* Reset_AVR) (void) = 0; //Dirty way of resetting the ATmega, but it works for now
 
-// The folder track depth is used by "cd .." and "pwd"
-// This looks like an ugly hack but the sdfatlib is not supporting going back to previous folder yet.
-// The current handling of "cd .." should be removed when it's available in the sdfat library.
-//#define FOLDER_TRACK_DEPTH 15
-#define FOLDER_TRACK_DEPTH 2 //Decreased for more RAM access
-char folderTree[FOLDER_TRACK_DEPTH][12];
+   static constexpr uint8_t max_commandline_args = 5;
+   static constexpr uint8_t max_folder_depth = 2;
+   static char folderTree[max_folder_depth][12];
+   static constexpr uint16_t max_file_string_len = 13;    
+   static constexpr char config_file_name[] = "config.txt";//This is the name of the file that contains the unit settings
+   static constexpr uint8_t subdir_indent = 2;
+   //Internal EEPROM locations for the user settings
+   struct eeprom_loc{
+     static constexpr uint16_t new_file_idx = 0x03; // 2 bytes
+   };
 
-#define CFG_FILENAME "config.txt" //This is the name of the file that contains the unit settings
+   struct port_pin{
 
-#define MAX_CFG "115200,103,214,0,1,1,0\0" //= 115200 bps, escape char of ASCII(103), 214 times, new log mode, verbose on, echo on, ignore RX false. 
-#define CFG_LENGTH (strlen(MAX_CFG) + 1) //Length of text found in config file. strlen ignores \0 so we have to add it back 
-#define SEQ_FILENAME "SEQLOG00.TXT" //This is the name for the file when you're in sequential mode
+     static constexpr uint8_t low = LOW;
+     static constexpr uint8_t high = HIGH;
+     typedef decltype (_SFR_IO8(0)) port_type;
+     port_pin(port_type port_in, uint8_t pin_in): port{port_in}, pin{pin_in}{}
+     port_type port;
+     const uint8_t pin;
+   };
 
-//Internal EEPROM locations for the user settings
+   struct error_code{
+      static constexpr byte sd_init = 3;
+      static constexpr byte card_init = 6;
+      static constexpr byte volume_init = 7;
+      static constexpr byte root_init = 8;
+      static constexpr byte file_open = 9;
+   };
 
-//STAT1 is a general LED and indicates serial traffic
-#define STAT1  5 //On PORTD
-#define STAT1_PORT  PORTD
-#define STAT2  5 //On PORTB
-#define STAT2_PORT  PORTB
-const byte statled1 = 5;  //This is the normal status LED
-const byte statled2 = 13; //This is the SPI LED, indicating SD traffic
+   static port_pin statled1{PORTD,5};
+   static port_pin statled2{PORTB,13};
 
-//Blinking LED error codes
-#define ERROR_SD_INIT	  3
-#define ERROR_NEW_BAUD	  5
-#define ERROR_CARD_INIT   6
-#define ERROR_VOLUME_INIT 7
-#define ERROR_ROOT_INIT   8
-#define ERROR_FILE_OPEN   9
+   //These are bit locations used when testing for simple embedded commands.
+   struct feedback_bits{
+      static constexpr uint8_t echo = 0x01;
+      static constexpr uint8_t extended_info = 0x02;
+      static constexpr uint8_t end_marker = 0x08;
+   };
 
-#if !DEBUG
-// Using OpenLog in an embedded environment only if not in debug mode. The reason for this
-// is that we are out of space if the simple embedded is included
-#define INCLUDE_SIMPLE_EMBEDDED
-#endif
+   Sd2Card card;
+   SdVolume volume;
+   SdFile currentDirectory;
 
-//These are bit locations used when testing for simple embedded commands.
+   long const setting_uart_speed = 9600; //This is the baud rate that the system runs at, default is 9600. Can be 1,200 to 1,000,000
+   byte const setting_escape_character = 0x1A; //This is the ASCII character we look for to break logging, default is ctrl+z
+   byte const setting_max_escape_character = 3; //Number of escape chars before break logging, default is 3
+   byte const setting_verbose = 1; //This controls the whether we get extended or simple responses.
+   byte const setting_echo = 0; //This turns on/off echoing at the command prompt
+   byte const setting_ignore_RX = 0; //This flag, when set to 1 will make OpenLog ignore the state of the RX pin when powering up
 
+   //Used for wild card delete and search
+   struct command_arg
+   {
+     const char* arg; //Points to first character in command line argument
+     byte arg_length; //Length of command line argument
+   };
 
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-#define EMBEDDED_END_MARKER	0x08
-#endif
+   static struct command_arg cmd_arg[max_commandline_args];
+   constexpr byte feedback_mode = (feedback_bits::echo | feedback_bits::extended_info);
 
-Sd2Card card;
-SdVolume volume;
-SdFile currentDirectory;
-
-long setting_uart_speed = 9600; //This is the baud rate that the system runs at, default is 9600. Can be 1,200 to 1,000,000
-byte setting_system_mode = MODE_NEWLOG; //This is the mode the system runs in, default is MODE_NEWLOG
-byte setting_escape_character = 0x1a; //This is the ASCII character we look for to break logging, default is ctrl+z
-byte setting_max_escape_character = 3; //Number of escape chars before break logging, default is 3
-byte setting_verbose = 1; //This controls the whether we get extended or simple responses.
-byte setting_echo = 1; //This turns on/off echoing at the command prompt
-byte setting_ignore_RX = 0; //This flag, when set to 1 will make OpenLog ignore the state of the RX pin when powering up
-
-//The number of command line arguments
-//Increase to support more arguments but be aware of the memory restrictions
-//command <arg1> <arg2> <arg3> <arg4> <arg5>
-#define MAX_COUNT_COMMAND_LINE_ARGS 5
-
-//Used for wild card delete and search
-struct command_arg
-{
-  char* arg; //Points to first character in command line argument
-  byte arg_length; //Length of command line argument
-};
-static struct command_arg cmd_arg[MAX_COUNT_COMMAND_LINE_ARGS];
-byte feedback_mode = (ECHO | EXTENDED_INFO);
-
-#if RAM_TESTING
+}
 //Passes back the available amount of free RAM
 int freeRam () 
 {
@@ -125,13 +97,11 @@ int freeRam ()
   int v; 
   return (int) &v - (__brkval == 0 ? (int) &__heap_start : (int) __brkval); 
 }
-#endif
+
 void printRam() 
 {
-#if RAM_TESTING
   NewSerial.print(F(" RAM:"));
   NewSerial.println(freeRam());
-#endif
 }
 
 //Handle errors by printing the error type and blinking LEDs in certain way
@@ -141,29 +111,28 @@ void systemError(byte error_type)
   NewSerial.print(F("Error "));
   switch(error_type)
   {
-  case ERROR_CARD_INIT:
-    NewSerial.print(F("card.init")); 
-    blink_error(ERROR_SD_INIT);
+  case error_code::sd_init:
+    NewSerial.print(F("sd")); 
     break;
-  case ERROR_VOLUME_INIT:
-    NewSerial.print(F("volume.init")); 
-    blink_error(ERROR_SD_INIT);
+  case error_code::card_init:
+   NewSerial.print(F("card")); 
     break;
-  case ERROR_ROOT_INIT:
-    NewSerial.print(F("root.init")); 
-    blink_error(ERROR_SD_INIT);
+  case error_code::volume_init:
+    NewSerial.print(F("volume")); 
     break;
-  case ERROR_FILE_OPEN:
-    NewSerial.print(F("file.open")); 
-    blink_error(ERROR_SD_INIT);
+  case error_code::root_init:
+    NewSerial.print(F("root")); 
+    break;
+  case error_code::file_open:
+    NewSerial.print(F("file")); 
     break;
   }
+  blink_error(error_type);
 }
 
-#if 0
 void setup(void)
 {
-  pinMode(statled1, OUTPUT);
+  pinMode(statled1.pin, OUTPUT);
 
   //Power down various bits of hardware to lower power usage  
   set_sleep_mode(SLEEP_MODE_IDLE);
@@ -180,121 +149,77 @@ void setup(void)
   power_timer2_disable();
   power_adc_disable();
 
-  read_system_settings(); //Load all system settings from EEPROM
-
-  //Setup UART
   NewSerial.begin(setting_uart_speed);
-  if (setting_uart_speed < 500)      // check for slow baud rates
-  {
-    //There is an error in the Serial library for lower than 500bps. 
-    //This fixes it. See issue 163: https://github.com/sparkfun/OpenLog/issues/163
-    // redo USART baud rate configuration
-    UBRR0 = (F_CPU / (16UL * setting_uart_speed)) - 1;
-    UCSR0A &= ~_BV(U2X0);
-  }
+
   NewSerial.print(F("1"));
 
   //Setup SD & FAT
-  if (!card.init(SPI_FULL_SPEED)) systemError(ERROR_CARD_INIT);
-  if (!volume.init(&card)) systemError(ERROR_VOLUME_INIT);
+  if (!card.init(SPI_FULL_SPEED)) systemError(error_code::card_init);
+  if (!volume.init(&card)) systemError(error_code::volume_init);
   currentDirectory.close(); //We close the cD before opening root. This comes from QuickStart example. Saves 4 bytes.
-  if (!currentDirectory.openRoot(&volume)) systemError(ERROR_ROOT_INIT);
+  if (!currentDirectory.openRoot(&volume)) systemError(error_code::root_init);
 
   NewSerial.print(F("2"));
 
+#if RAM_TESTING == 1
   printRam(); //Print the available RAM
-
-  //Search for a config file and load any settings found. This will over-ride previous EEPROM settings if found.
-  read_config_file();
-
-  if(setting_ignore_RX == OFF) //If we are NOT ignoring RX, then
-    check_emergency_reset(); //Look to see if the RX pin is being pulled low
-
+#endif
   memset(folderTree, 0, sizeof(folderTree)); //Clear folder tree
 }
 
 void loop(void)
 {
-  //If we are in new log mode, find a new file name to write to
-  if(setting_system_mode == MODE_NEWLOG)
-    append_file(newlog()); //Append the file name that newlog() returns
-
-  //If we are in sequential log mode, determine if seqlog.txt has been created or not, and then open it for logging
-  if(setting_system_mode == MODE_SEQLOG)
-    seqlog();
-
-  //Once either one of these modes exits, go to normal command mode, which is called by returning to main()
   command_shell();
-
   while(1); //We should never get this far
 }
-#endif
 
 //Log to a new file everytime the system boots
 //Checks the spots in EEPROM for the next available LOG# file name
 //Updates EEPROM and then appends to the new log file.
 //Limited to 65535 files but this should not always be the case.
-
+#if 0
 namespace {
- char new_file_name[13];
+   char new_file_name[13];
 }
 char* newlog(void)
 {
-  byte msb, lsb;
-  uint16_t new_file_number;
-
   SdFile newFile; //This will contain the file for SD writing
-
-  //Combine two 8-bit EEPROM spots into one 16-bit number
-  lsb = EEPROM.read(LOCATION_FILE_NUMBER_LSB);
-  msb = EEPROM.read(LOCATION_FILE_NUMBER_MSB);
-
-  new_file_number = msb;
-  new_file_number = new_file_number << 8;
-  new_file_number |= lsb;
-
+  uint16_t new_file_number = 
+      static_cast<uint16_t>(EEPROM.read(eeprom_loc::new_file_idx)) | 
+      (static_cast<uint16_t>(EEPROM.read(eeprom_loc::new_file_idx+1)) << 8);
+      
   //If both EEPROM spots are 255 (0xFF), that means they are un-initialized (first time OpenLog has been turned on)
   //Let's init them both to 0
-  if((lsb == 255) && (msb == 255))
-  {
+  if(new_file_number == 0xFFFF) {
     new_file_number = 0; //By default, unit will start at file number zero
-    EEPROM.write(LOCATION_FILE_NUMBER_LSB, 0x00);
-    EEPROM.write(LOCATION_FILE_NUMBER_MSB, 0x00);
+    EEPROM.write(eeprom_loc::new_file_idx, 0x00);
+    EEPROM.write(eeprom_loc::new_file_idx+1, 0x00);
   }
 
   //The above code looks like it will forever loop if we ever create 65535 logs
   //Let's quit if we ever get to 65534
   //65534 logs is quite possible if you have a system with lots of power on/off cycles
-  if(new_file_number == 65534)
-  {
+  if(new_file_number == 65534) {
     //Gracefully drop out to command prompt with some error
     NewSerial.print(F("!Too many logs:1!"));
     return(0); //Bail!
   }
-
   //If we made it this far, everything looks good - let's start testing to see if our file number is the next available
-
   //Search for next available log spot
-  //char new_file_name[] = "LOG00000.TXT";
- //char new_file_name[13];
-  while(1)
-  {
+  while(1) {
     sprintf_P(new_file_name, PSTR("LOG%05u.TXT"), new_file_number); //Splice the new file number into this file name
-
     //Try to open file, if fail (file doesn't exist), then break
-    if (newFile.open(&currentDirectory, new_file_name, O_CREAT | O_EXCL | O_WRITE)) break;
-
+    if (newFile.open(&currentDirectory, new_file_name, O_CREAT | O_EXCL | O_WRITE)) {
+      break;
+    }
     //Try to open file and see if it is empty. If so, use it.
-    if (newFile.open(&currentDirectory, new_file_name, O_READ)) 
-    {
-      if (newFile.fileSize() == 0)
-      {
+    if (newFile.open(&currentDirectory, new_file_name, O_READ))  {
+      if (newFile.fileSize() == 0) {
         newFile.close();        // Close this existing file we just opened.
         return(new_file_name);  // Use existing empty file.
       }
       newFile.close(); // Close this existing file we just opened.
     }
-
     //Try the next number
     new_file_number++;
     if(new_file_number > 65533) //There is a max of 65534 logs
@@ -304,26 +229,25 @@ char* newlog(void)
     }
   }
   newFile.close(); //Close this new file we just opened
-
   new_file_number++; //Increment so the next power up uses the next file #
 
   //Record new_file number to EEPROM
-  lsb = (byte)(new_file_number & 0x00FF);
-  msb = (byte)((new_file_number & 0xFF00) >> 8);
-
-  EEPROM.write(LOCATION_FILE_NUMBER_LSB, lsb); // LSB
-
-  if (EEPROM.read(LOCATION_FILE_NUMBER_MSB) != msb)
-    EEPROM.write(LOCATION_FILE_NUMBER_MSB, msb); // MSB
+  byte lsb = (byte)(new_file_number & 0x00FF);
+  byte msb = (byte)((new_file_number & 0xFF00) >> 8);
+  EEPROM.write(eeprom_loc::new_file_idx, lsb); 
+  if (EEPROM.read(eeprom_loc::new_file_idx+1) != msb){
+    EEPROM.write(eeprom_loc::new_file_idx+1, msb); // MSB
+  }
 
 #if DEBUG
   NewSerial.print(F("\nCreated new file: "));
   NewSerial.println(new_file_name);
 #endif
-
   return(new_file_name);
 }
+#endif
 
+#if 0
 //Log to the same file every time the system boots, sequentially
 //Checks to see if the file SEQLOG.txt is available
 //If not, create it
@@ -333,20 +257,29 @@ char* newlog(void)
 void seqlog(void)
 {
   SdFile seqFile;
-
-  char sequentialFileName[strlen(SEQ_FILENAME)]; //Limited to 8.3
-  strcpy_P(sequentialFileName, PSTR(SEQ_FILENAME)); //This is the name of the config file. 'config.sys' is probably a bad idea.
-
+  const char sequentialFileName[] = "SEQLOG00.TXT";
   //Try to create sequential file
   if (!seqFile.open(&currentDirectory, sequentialFileName, O_CREAT | O_WRITE))
   {
     NewSerial.print(F("Error creating SEQLOG\n"));
     return;
   }
-
   seqFile.close(); //Close this new file we just opened
-
   append_file(sequentialFileName); 
+}
+#endif
+
+void power_saving_mode()
+{
+   digitalWrite(statled1.pin, port_pin::low);
+
+   power_timer0_disable(); //Shut down peripherals we don't need
+   power_spi_disable();
+   sleep_mode(); //Stop everything and go to sleep. Wake up if serial character received
+
+   power_spi_enable(); //After wake up, power up peripherals
+   power_timer0_enable();
+
 }
 
 //This is the most important function of the device. These loops have been tweaked as much as possible.
@@ -356,14 +289,13 @@ void seqlog(void)
 //Does not exit until Ctrl+z (ASCII 26) is received
 //Returns 0 on error
 //Returns 1 on success
-byte append_file(char* file_name)
+byte append_file(const char* file_name)
 {
   SdFile workingFile;
-
   // O_CREAT - create the file if it does not exist
   // O_APPEND - seek to the end of the file prior to each write
   // O_WRITE - open for write
-  if (!workingFile.open(&currentDirectory, file_name, O_CREAT | O_APPEND | O_WRITE)) systemError(ERROR_FILE_OPEN);
+  if (!workingFile.open(&currentDirectory, file_name, O_CREAT | O_APPEND | O_WRITE)) systemError(error_code::file_open);
   if (workingFile.fileSize() == 0) {
     //This is a trick to make sure first cluster is allocated - found in Bill's example/beta code
     //workingFile.write((byte)0); //Leaves a NUL at the beginning of a file
@@ -372,7 +304,7 @@ byte append_file(char* file_name)
   }  
 
   NewSerial.print(F("<")); //give a different prompt to indicate no echoing
-  digitalWrite(statled1, HIGH); //Turn on indicator LED
+  digitalWrite(statled1.pin, HIGH); //Turn on indicator LED
 
   const byte LOCAL_BUFF_SIZE = 128; //This is the 2nd buffer. It pulls from the larger NewSerial buffer as quickly as possible.
   byte localBuffer[LOCAL_BUFF_SIZE];
@@ -382,732 +314,161 @@ byte append_file(char* file_name)
   const uint16_t MAX_IDLE_TIME_MSEC = 500; //The number of milliseconds before unit goes to sleep
   const uint16_t MAX_TIME_BEFORE_SYNC_MSEC = 5000;
   uint32_t lastSyncTime = millis(); //Keeps track of the last time the file was synced
-
+#if RAM_TESTING == 1
   printRam(); //Print the available RAM
-
+#endif
   //Check if we should ignore escape characters
   //If we are ignoring escape characters the recording loop is infinite and can be made shorter (less checking)
   //This should allow for recording at higher incoming rates
-  if(setting_max_escape_character == 0)
-  {
-    //Start recording incoming characters
-    //With no escape characters, do this infinitely
-/*
-    uint8_t ch = NewSerial.read();
-      if (last_escape == true){
-         if( ch == Escape_char){
-            out << escape_char;
-            last_escape == false;
-         }
-         else{
-            switch ch{
-               case  Close
-               
-            }
-         }
-      }
-
-    }
-*/
-    while(1)
-    {
+  if(setting_max_escape_character == 0){
+    while(1){
       byte charsToRecord = NewSerial.read(localBuffer, sizeof(localBuffer)); //Read characters from global buffer into the local buffer
-      if (charsToRecord > 0) //If we have characters, check for escape characters
-      {
-        workingFile.write(localBuffer, charsToRecord); //Record the buffer to the card
-
-        toggleLED(statled1); //STAT1_PORT ^= (1<<STAT1); //Toggle the STAT1 LED each time we record the buffer
-
-        if((millis() - lastSyncTime) > MAX_TIME_BEFORE_SYNC_MSEC) //This will force a sync approximately every 5 seconds
-        { 
+      if (charsToRecord > 0) {
+         workingFile.write(localBuffer, charsToRecord); //Record the buffer to the card
+         toggleLED(statled1.pin); //STAT1_PORT ^= (1<<STAT1); //Toggle the STAT1 LED each time we record the buffer
+         if((millis() - lastSyncTime) > MAX_TIME_BEFORE_SYNC_MSEC){ 
           //This is here to make sure a log is recorded in the instance
           //where the user is throwing non-stop data at the unit from power on to forever
-          workingFile.sync(); //Sync the card
-          lastSyncTime = millis();
-        }
-
-      }
-      //No characters recevied?
-      else if( (millis() - lastSyncTime) > MAX_IDLE_TIME_MSEC) { //If we haven't received any characters in 2s, goto sleep
-        workingFile.sync(); //Sync the card before we go to sleep
-
-        STAT1_PORT &= ~(1<<STAT1); //Turn off stat LED to save power
-
-        power_timer0_disable(); //Shut down peripherals we don't need
-        power_spi_disable();
-        sleep_mode(); //Stop everything and go to sleep. Wake up if serial character received
-
-        power_spi_enable(); //After wake up, power up peripherals
-        power_timer0_enable();
-
-        escape_chars_received = 0; // Clear the esc flag as it has timed out
-        lastSyncTime = millis(); //Reset the last sync time to now
+           workingFile.sync(); //Sync the card
+           lastSyncTime = millis();
+         }
+      }else if( (millis() - lastSyncTime) > MAX_IDLE_TIME_MSEC) { //If we haven't received any characters in 2s, goto sleep
+         workingFile.sync(); //Sync the card before we go to sleep
+         power_saving_mode();
+         escape_chars_received = 0; // Clear the esc flag as it has timed out
+         lastSyncTime = millis(); //Reset the last sync time to now
       }
     }
   }
-
   //We only get this far if escape characters are more than zero
-
   //Start recording incoming characters
-  while(escape_chars_received < setting_max_escape_character)
-  {
-
+  while(escape_chars_received < setting_max_escape_character) {
     byte charsToRecord = NewSerial.read(localBuffer, sizeof(localBuffer)); //Read characters from global buffer into the local buffer
-    if (charsToRecord > 0) //If we have characters, check for escape characters
-    {
-
-      if (localBuffer[0] == setting_escape_character) 
-      {
+    if (charsToRecord > 0) {
+      if (localBuffer[0] == setting_escape_character)  {
         escape_chars_received++;
-
-        //Scan the local buffer for esacape characters
-        for(checkedSpot = 1 ; checkedSpot < charsToRecord ; checkedSpot++)
-        {
+        //Scan the local buffer for escape characters
+        for(checkedSpot = 1 ; checkedSpot < charsToRecord ; checkedSpot++){
           if(localBuffer[checkedSpot] == setting_escape_character) {
             escape_chars_received++;
             //If charsToRecord is greater than 3 there's a chance here where we receive three esc chars
             // and then reset the variable: 26 26 26 A T + would not escape correctly
-            if(escape_chars_received == setting_max_escape_character)
-            {
+            if(escape_chars_received == setting_max_escape_character){
               break;
             }
           }
-          else
-            escape_chars_received = 0; 
+          else{
+            escape_chars_received = 0;
+          }
         }
-      }
-      else
+      }else{
         escape_chars_received = 0;
-
+      }
       workingFile.write(localBuffer, charsToRecord); //Record the buffer to the card
-
-      toggleLED(statled1); //STAT1_PORT ^= (1<<STAT1); //Toggle the STAT1 LED each time we record the buffer
-
-      if((millis() - lastSyncTime) > MAX_TIME_BEFORE_SYNC_MSEC) //This will force a sync approximately every 5 seconds
-      { 
+      toggleLED(statled1.pin); //STAT1_PORT ^= (1<<STAT1); //Toggle the STAT1 LED each time we record the buffer
+      if((millis() - lastSyncTime) > MAX_TIME_BEFORE_SYNC_MSEC){ 
         //This is here to make sure a log is recorded in the instance
         //where the user is throwing non-stop data at the unit from power on to forever
         workingFile.sync(); //Sync the card
         lastSyncTime = millis();
       }
-
     }
-    //No characters recevied?
+    //No characters received?
     else if( (millis() - lastSyncTime) > MAX_IDLE_TIME_MSEC) { //If we haven't received any characters in 2s, goto sleep
       workingFile.sync(); //Sync the card before we go to sleep
-
-      STAT1_PORT &= ~(1<<STAT1); //Turn off stat LED to save power
-
-      power_timer0_disable(); //Shut down peripherals we don't need
-      power_spi_disable();
-      sleep_mode(); //Stop everything and go to sleep. Wake up if serial character received
-
-      power_spi_enable(); //After wake up, power up peripherals
-      power_timer0_enable();
-
+      power_saving_mode();
       escape_chars_received = 0; // Clear the esc flag as it has timed out
       lastSyncTime = millis(); //Reset the last sync time to now
     }
-
   }
-
   workingFile.sync();
   workingFile.close(); // Done recording, close out the file
-
-    digitalWrite(statled1, LOW); // Turn off indicator LED
-
+  digitalWrite(statled1.pin, port_pin::low); // Turn off indicator LED
   NewSerial.print(F("~")); // Indicate a successful record
-
   return(1); //Success!
 }
 
-//The following are system functions needed for basic operation
-//=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
-
-//Blinks the status LEDs to indicate a type of error
-void blink_error(byte ERROR_TYPE) 
-{
+void blink_error(byte ERROR_TYPE) {
   while(1) {
     for(int x = 0 ; x < ERROR_TYPE ; x++) {
-      digitalWrite(statled1, HIGH);
+      digitalWrite(statled1.pin, port_pin::high);
       delay(200);
-      digitalWrite(statled1, LOW);
+      digitalWrite(statled1.pin, port_pin::low);
       delay(200);
     }
-
     delay(2000);
   }
 }
 
-//Check to see if we need an emergency UART reset
-//Scan the RX pin for 2 seconds
-//If it's low the entire time, then return 1
-void check_emergency_reset(void)
-{
-  pinMode(0, INPUT); //Turn the RX pin into an input
-  digitalWrite(0, HIGH); //Push a 1 onto RX pin to enable internal pull-up
-
-  //Quick pin check
-  if(digitalRead(0) == HIGH) return;
-
-  //Wait 2 seconds, blinking LEDs while we wait
-  pinMode(statled2, OUTPUT);
-  digitalWrite(statled2, HIGH); //Set the STAT2 LED
-  for(byte i = 0 ; i < 40 ; i++)
-  {
-    delay(25);
-    toggleLED(statled1); //STAT1_PORT ^= (1<<STAT1); //Blink the stat LEDs
-
-    if(digitalRead(0) == HIGH) return; //Check to see if RX is not low anymore
-
-    delay(25);
-    toggleLED(statled2); //STAT2_PORT ^= (1<<STAT2); //Blink the stat LEDs
-
-    if(digitalRead(0) == HIGH) return; //Check to see if RX is not low anymore
-  }		
-
-  //If we make it here, then RX pin stayed low the whole time
-  set_default_settings(); //Reset baud, escape characters, escape number, system mode
-
-  //Try to setup the SD card so we can record these new settings
-  if (!card.init()) systemError(ERROR_CARD_INIT);
-  if (!volume.init(&card)) systemError(ERROR_VOLUME_INIT);
-  currentDirectory.close(); //We close the cD before opening root. This comes from QuickStart example. Saves 4 bytes.
-  if (!currentDirectory.openRoot(&volume)) systemError(ERROR_ROOT_INIT);
-
-  record_config_file(); //Record new config settings
-
-  pinMode(statled1, OUTPUT);
-  pinMode(statled2, OUTPUT);
-  digitalWrite(statled1, HIGH);
-  digitalWrite(statled2, HIGH);
-
-  //Now sit in forever loop indicating system is now at 9600bps
-  while(1)
-  {
-    delay(500);
-    toggleLED(statled1); //STAT1_PORT ^= (1<<STAT1); //Blink the stat LEDs
-    toggleLED(statled2); //STAT2_PORT ^= (1<<STAT2); //Blink the stat LEDs
-  }
-}
-
-//Resets all the system settings to safe values
-void set_default_settings(void)
-{
-  //Reset UART to 9600bps
-  writeBaud(9600);
-
-  //Reset system to new log mode
-  EEPROM.write(LOCATION_SYSTEM_SETTING, MODE_NEWLOG);
-
-  //Reset escape character to ctrl+z
-  EEPROM.write(LOCATION_ESCAPE_CHAR, 26); 
-
-  //Reset number of escape characters to 3
-  EEPROM.write(LOCATION_MAX_ESCAPE_CHAR, 3);
-
-  //Reset verbose responses to on
-  EEPROM.write(LOCATION_VERBOSE, ON);
-
-  //Reset echo to on
-  EEPROM.write(LOCATION_ECHO, ON);
-
-  //Reset the ignore RX to 'Pay attention to RX!'
-  EEPROM.write(LOCATION_IGNORE_RX, OFF);
-
-  //These settings are not recorded to the config file
-  //We can't do it here because we are not sure the FAT system is init'd
-}
-
-#if 0
-//Reads the current system settings from EEPROM
-//If anything looks weird, reset setting to default value
-void read_system_settings(void)
-{
-  //Read what the current UART speed is from EEPROM memory
-  //Default is 9600
-  setting_uart_speed = readBaud(); //Combine the three bytes
-  if(setting_uart_speed < BAUD_MIN || setting_uart_speed > BAUD_MAX) 
-  {
-    setting_uart_speed = 9600; //Reset UART to 9600 if there is no speed stored
-    writeBaud(setting_uart_speed); //Record to EEPROM
-  }
-
-  //Determine the system mode we should be in
-  //Default is NEWLOG mode
-  setting_system_mode = EEPROM.read(LOCATION_SYSTEM_SETTING);
-  if(setting_system_mode > 5) 
-  {
-    setting_system_mode = MODE_NEWLOG; //By default, unit will turn on and go to new file logging
-    EEPROM.write(LOCATION_SYSTEM_SETTING, setting_system_mode);
-  }
-
-  //Read the escape_character
-  //ASCII(26) is ctrl+z
-  setting_escape_character = EEPROM.read(LOCATION_ESCAPE_CHAR);
-  if(setting_escape_character == 0 || setting_escape_character == 255) 
-  {
-    setting_escape_character = 26; //Reset escape character to ctrl+z
-    EEPROM.write(LOCATION_ESCAPE_CHAR, setting_escape_character);
-  }
-
-  //Read the number of escape_characters to look for
-  //Default is 3
-  setting_max_escape_character = EEPROM.read(LOCATION_MAX_ESCAPE_CHAR);
-  if(setting_max_escape_character == 255) 
-  {
-    setting_max_escape_character = 3; //Reset number of escape characters to 3
-    EEPROM.write(LOCATION_MAX_ESCAPE_CHAR, setting_max_escape_character);
-  }
-
-  //Read whether we should use verbose responses or not
-  //Default is true
-  setting_verbose = EEPROM.read(LOCATION_VERBOSE);
-  if(setting_verbose != ON || setting_verbose != OFF) 
-  {
-    setting_verbose = ON; //Reset verbose to true
-    EEPROM.write(LOCATION_VERBOSE, setting_verbose);
-  }
-
-  //Read whether we should echo characters or not
-  //Default is true
-  setting_echo = EEPROM.read(LOCATION_ECHO);
-  if(setting_echo != ON || setting_echo != OFF) 
-  {
-    setting_echo = ON; //Reset to echo on
-    EEPROM.write(LOCATION_ECHO, setting_echo);
-  }
-
-  //Set flags for extended mode options  
-  if (setting_verbose == ON)
-    feedback_mode |= EXTENDED_INFO;
-  else
-    feedback_mode &= ((byte)~EXTENDED_INFO);
-
-  if (setting_echo == ON)
-    feedback_mode |= ECHO;
-  else
-    feedback_mode &= ((byte)~ECHO);
-
-  //Read whether we should ignore RX at power up
-  //Some users need OpenLog to ignore the RX pin during power up
-  //Default is false or ignore
-  setting_ignore_RX = EEPROM.read(LOCATION_IGNORE_RX);
-  if(setting_ignore_RX > 1) 
-  {
-    setting_ignore_RX = OFF; //By default we DO NOT ignore RX
-    EEPROM.write(LOCATION_IGNORE_RX, setting_ignore_RX);
-  }
-}
-#endif
-
-void read_config_file(void)
-{
-  SdFile rootDirectory;
-  SdFile configFile;  
-  if (!rootDirectory.openRoot(&volume)) systemError(ERROR_ROOT_INIT); // open the root directory
-
-  char configFileName[strlen(CFG_FILENAME)]; //Limited to 8.3
-  strcpy_P(configFileName, PSTR(CFG_FILENAME)); //This is the name of the config file. 'config.sys' is probably a bad idea.
-
-  //Check to see if we have a config file
-  if (!configFile.open(&rootDirectory, configFileName, O_READ)) {
-    //If we don't have a config file already, then create config file and record the current system settings to the file
-#if DEBUG
-    NewSerial.println(F("No config found - creating default:"));
-#endif
-    configFile.close();
-    rootDirectory.close(); //Close out the file system before we open a new one
-
-      //Record the current eeprom settings to the config file
-    record_config_file();
-    return;
-  }
-
-  //If we found the config file then load settings from file and push them into EEPROM
-#if DEBUG
-  NewSerial.println(F("Found config file!"));
-#endif
-
-  //Read up to 22 characters from the file. There may be a better way of doing this...
-  char c;
-  unsigned int len;
-  byte settings_string[CFG_LENGTH]; //"115200,103,14,0,1,1,0\0" = 115200 bps, escape char of ASCII(103), 14 times, new log mode, verbose on, echo on, ignore RX false.
-  for(len = 0 ; len < CFG_LENGTH ; len++) {
-    if( (c = configFile.read()) < 0) break; //We've reached the end of the file
-    if(c == '\0') break; //Bail if we hit the end of this string
-    settings_string[len] = c;
-  }
-  configFile.close();
-  rootDirectory.close();
-
-#if DEBUG
-  //Print line for debugging
-  NewSerial.print(F("Text Settings: "));
-  for(int i = 0; i < len; i++)
-    NewSerial.write(settings_string[i]);
-  NewSerial.println();
-  NewSerial.print(F("Len: "));
-  NewSerial.println(len);
-#endif
-
-  //Default the system settings in case things go horribly wrong
-  long new_system_baud = 9600;
-  byte new_system_mode = MODE_NEWLOG;
-  byte new_system_escape = 26;
-  byte new_system_max_escape = 3;
-  byte new_system_verbose = ON;
-  byte new_system_echo = ON;
-  byte new_system_ignore_RX = OFF;  
-
-  //Parse the settings out
-  byte i = 0, j = 0, setting_number = 0;
-  char new_setting[8]; //Max length of a setting is 7, the bps setting = '1000000' plus '\0'
-  byte new_setting_int = 0;
-
-  for(i = 0 ; i < len; i++)
-  {
-    //Pick out one setting from the line of text
-    for(j = 0 ; settings_string[i] != ',' && i < len && j < 6 ; )
-    {
-      new_setting[j] = settings_string[i];
-      i++;
-      j++;
-    }
-
-    new_setting[j] = '\0'; //Terminate the string for array compare
-    new_setting_int = atoi(new_setting); //Convert string to int
-
-    if(setting_number == 0) //Baud rate
-    {
-      new_system_baud = strtolong(new_setting);
-
-      //Basic error checking
-      if(new_system_baud < BAUD_MIN || new_system_baud > BAUD_MAX) new_system_baud = 9600; //Default to 9600
-    }
-    else if(setting_number == 1) //Escape character
-    {
-      new_system_escape = new_setting_int;
-      if(new_system_escape == 0 || new_system_escape > 127) new_system_escape = 26; //Default is ctrl+z
-    }
-    else if(setting_number == 2) //Max amount escape character
-    {
-      new_system_max_escape = new_setting_int;
-      if(new_system_max_escape > 254) new_system_max_escape = 3; //Default is 3
-    }
-    else if(setting_number == 3) //System mode
-    {
-      new_system_mode = new_setting_int;
-      if(new_system_mode == 0 || new_system_mode > MODE_COMMAND) new_system_mode = MODE_NEWLOG; //Default is NEWLOG
-    }
-    else if(setting_number == 4) //Verbose setting
-    {
-      new_system_verbose = new_setting_int;
-      if(new_system_verbose != ON && new_system_verbose != OFF) new_system_verbose = ON; //Default is on
-    }
-    else if(setting_number == 5) //Echo setting
-    {
-      new_system_echo = new_setting_int;
-      if(new_system_echo != ON && new_system_echo != OFF) new_system_echo = ON; //Default is on
-    }
-    else if(setting_number == 6) //Ignore RX setting
-    {
-      new_system_ignore_RX = new_setting_int;
-      if(new_system_ignore_RX != ON && new_system_ignore_RX != OFF) new_system_ignore_RX = OFF; //Default is to listen to RX
-    }
-    else
-      //We're done! Stop looking for settings
-      break;
-
-    setting_number++;
-  }
-
-  //We now have the settings loaded into the global variables. Now check if they're different from EEPROM settings
-  boolean recordNewSettings = false;
-
-  if(new_system_baud != setting_uart_speed) {
-    //If the baud rate from the file is different from the current setting,
-    //Then update the setting to the file setting
-    //And re-init the UART
-
-    writeBaud(new_system_baud); //Write this baudrate to EEPROM
-    setting_uart_speed = new_system_baud;
-    NewSerial.begin(setting_uart_speed); //Move system to new uart speed
-
-      recordNewSettings = true;
-  }
-
-  if(new_system_mode != setting_system_mode) {
-    //Goto new system mode
-    setting_system_mode = new_system_mode;
-    EEPROM.write(LOCATION_SYSTEM_SETTING, setting_system_mode);
-
-    recordNewSettings = true;
-  }
-
-  if(new_system_escape != setting_escape_character) {
-    //Goto new system escape char
-    setting_escape_character = new_system_escape;
-    EEPROM.write(LOCATION_ESCAPE_CHAR, setting_escape_character); 
-
-    recordNewSettings = true;
-  }
-
-  if(new_system_max_escape != setting_max_escape_character) {
-    //Goto new max escape
-    setting_max_escape_character = new_system_max_escape;
-    EEPROM.write(LOCATION_MAX_ESCAPE_CHAR, setting_max_escape_character);
-
-    recordNewSettings = true;
-  }
-
-  if(new_system_verbose != setting_verbose) {
-    //Goto new verbose setting
-    setting_verbose = new_system_verbose;
-    EEPROM.write(LOCATION_VERBOSE, setting_verbose);
-
-    recordNewSettings = true;
-  }
-
-  if(new_system_echo != setting_echo) {
-    //Goto new echo setting
-    setting_echo = new_system_echo;
-    EEPROM.write(LOCATION_ECHO, setting_echo);
-
-    recordNewSettings = true;
-  }
-
-  if(new_system_ignore_RX != setting_ignore_RX) {
-    //Goto new ignore setting
-    setting_ignore_RX = new_system_ignore_RX;
-    EEPROM.write(LOCATION_IGNORE_RX, setting_ignore_RX);
-
-    recordNewSettings = true;
-  }
-
-  //We don't want to constantly record a new config file on each power on. Only record when there is a change.
-  if(recordNewSettings == true)
-    record_config_file(); //If we corrected some values because the config file was corrupt, then overwrite any corruption
-#if DEBUG
-  else
-    NewSerial.println(F("Config file matches system settings"));
-#endif
-
-  //All done! New settings are loaded. System will now operate off new config settings found in file.
-
-  //Set flags for extended mode options  
-  if (setting_verbose == ON)
-    feedback_mode |= EXTENDED_INFO;
-  else
-    feedback_mode &= ((byte)~EXTENDED_INFO);
-
-  if (setting_echo == ON)
-    feedback_mode |= ECHO;
-  else
-    feedback_mode &= ((byte)~ECHO);
-
-}
-
-//Records the current EEPROM settings to the config file
-//If a config file exists, it is trashed and a new one is created
-void record_config_file(void)
-{
-  //I'm worried that the user may not be in the root directory when modifying config settings. If that is the case,
-  //config file will not be found and it will be created in some erroneus directory. The changes to user settings may be lost on the
-  //next power cycles. To prevent this, we will open another instance of the file system, then close it down when we are done.
-  SdFile rootDirectory;
-  SdFile myFile;
-  if (!rootDirectory.openRoot(&volume)) systemError(ERROR_ROOT_INIT); // open the root directory
-
-  char configFileName[strlen(CFG_FILENAME)];
-  strcpy_P(configFileName, PSTR(CFG_FILENAME)); //This is the name of the config file. 'config.sys' is probably a bad idea.
-
-  //If there is currently a config file, trash it
-  if (myFile.open(&rootDirectory, configFileName, O_WRITE)) {
-    if (!myFile.remove()){
-      NewSerial.println(F("Remove config failed"));
-      myFile.close(); //Close this file
-      rootDirectory.close(); //Close this file structure instance
-      return;
-    }
-  }
-
-  //myFile.close(); //Not sure if we need to close the file before we try to reopen it
-
-  //Create config file
-  if (myFile.open(&rootDirectory, configFileName, O_CREAT | O_APPEND | O_WRITE) == 0) {
-    NewSerial.println(F("Create config failed"));
-    myFile.close(); //Close this file
-    rootDirectory.close(); //Close this file structure instance
-    return;
-  }
-  //Config was successfully created, now record current system settings to the config file
-
-  char settings_string[CFG_LENGTH]; //"115200,103,14,0,1,1,0\0" = 115200 bps, escape char of ASCII(103), 14 times, new log mode, verbose on, echo on, ignore RX false.
-
-  //Before we read the EEPROM values, they've already been tested and defaulted in the read_system_settings function
-  long current_system_baud = readBaud();
-  byte current_system_escape = EEPROM.read(LOCATION_ESCAPE_CHAR);
-  byte current_system_max_escape = EEPROM.read(LOCATION_MAX_ESCAPE_CHAR);
-  byte current_system_mode = EEPROM.read(LOCATION_SYSTEM_SETTING);
-  byte current_system_verbose = EEPROM.read(LOCATION_VERBOSE);
-  byte current_system_echo = EEPROM.read(LOCATION_ECHO);
-  byte current_system_ignore_RX = EEPROM.read(LOCATION_IGNORE_RX);
-
-  //Convert system settings to visible ASCII characters
-  sprintf_P(settings_string, PSTR("%ld,%d,%d,%d,%d,%d,%d\0"), current_system_baud, current_system_escape, current_system_max_escape, current_system_mode, current_system_verbose, current_system_echo, current_system_ignore_RX);
-
-  //Record current system settings to the config file
-  if(myFile.write(settings_string, strlen(settings_string)) != static_cast<int>(strlen(settings_string)) )
-    NewSerial.println(F("error writing to file"));
-
-  myFile.println(); //Add a break between lines
-
-  //Add a decoder line to the file
-#define HELP_STR "baud,escape,esc#,mode,verb,echo,ignoreRX\0"
-  char helperString[strlen(HELP_STR) + 1]; //strlen is preprocessed but returns one less because it ignores the \0
-  strcpy_P(helperString, PSTR(HELP_STR));
-  myFile.write(helperString); //Add this string to the file
-
-  myFile.sync(); //Sync all newly written data to card
-  myFile.close(); //Close this file
-  rootDirectory.close(); //Close this file structure instance
-  //Now that the new config file has the current system settings, nothing else to do!
-}
-
-//End core system functions
-//=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
 void command_shell(void)
 {
   //Provide a simple shell
   char buffer[30];
   byte tmp_var;
-
   SdFile tempFile;
-
-#ifdef INCLUDE_SIMPLE_EMBEDDED
- // uint32_t file_index;
-  byte command_succedded = 1;
-#endif //INCLUDE_SIMPLE_EMBEDDED
-
+  byte command_succeeded = 1;
+#if RAM_TESTING == 1
   printRam(); //Print the available RAM
-
-  while(true)
-  {
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-    if ((feedback_mode & EMBEDDED_END_MARKER) > 0)
-      NewSerial.print((char)0x1A); // Ctrl+Z ends the data and marks the start of result
-
-    if (command_succedded == 0)
+#endif
+  while(true){
+    if ((feedback_mode & feedback_bits::end_marker) > 0){
+      NewSerial.print(F("\0x1A")); // Ctrl+Z ends the data and marks the start of result
+    }
+    if (command_succeeded == 0){
       NewSerial.print(F("!"));
-#endif
+    }
     NewSerial.print(F(">"));
-
     //Read command
-    if(read_line(buffer, sizeof(buffer)) < 1)
-    {
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-      command_succedded = 1;
-#endif
+    if(read_line(buffer, sizeof(buffer)) < 1){
+      command_succeeded = 1;
       continue;
     }
-
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-    command_succedded = 0;
-#endif
-
+    command_succeeded = 0;
     //Argument 1: The actual command
     char* command_arg = get_cmd_arg(0);
-
     //Execute command
-    if(strcmp_P(command_arg, PSTR("init")) == 0)
-    {
-      if ((feedback_mode & EXTENDED_INFO) > 0)
+    if(strcmp_P(command_arg, PSTR("init")) == 0){
+      if ((feedback_mode & feedback_bits::extended_info) > 0)
         NewSerial.println(F("Closing down file system"));
-
       //Close file system
       currentDirectory.close();
-
       //Open the root directory
-      if (!currentDirectory.openRoot(&volume)) systemError(ERROR_ROOT_INIT);
+      if (!currentDirectory.openRoot(&volume)) {
+         systemError(error_code::root_init);
+      }
       memset(folderTree, 0, sizeof(folderTree)); //Clear folder tree
-      if ((feedback_mode & EXTENDED_INFO) > 0)
+      if ((feedback_mode & feedback_bits::extended_info) > 0){
         NewSerial.println(F("File system initialized"));
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-      command_succedded = 1;
-#endif
+      }
+      command_succeeded = 1;
     }
-
-    else if(strcmp_P(command_arg, PSTR("?")) == 0)
-    {
-      //Print available commands
+//---------------------------------------------------------------
+    else if(strcmp_P(command_arg, PSTR("help")) == 0) {
       print_menu();
-
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-      command_succedded = 1;
-#endif
-
+      command_succeeded = 1;
     }
-    else if(strcmp_P(command_arg, PSTR("help")) == 0)
-    {
-      //Print available commands
-      print_menu();
-
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-      command_succedded = 1;
-#endif
-
-    }
-    else if(strcmp_P(command_arg, PSTR("baud")) == 0)
-    {
-      //Go into baud select menu
-      baud_menu();
-
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-      command_succedded = 1;
-#endif
-
-    }
-    else if(strcmp_P(command_arg, PSTR("set")) == 0)
-    {
-      //Go into system setting menu
-      system_menu();
-
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-      command_succedded = 1;
-#endif
-    }
-
-    else if(strcmp_P(command_arg, PSTR("ls")) == 0)
-    {
-      if ((feedback_mode & EXTENDED_INFO) > 0)
-      {
+//---------------------------------------------------------------
+    else if(strcmp_P(command_arg, PSTR("ls")) == 0){
+      if ((feedback_mode & feedback_bits::extended_info) > 0) {
         NewSerial.print(F("Volume is FAT"));
         NewSerial.println(volume.fatType(), DEC);
       }
 
-      if (count_cmd_args() == 1)  // has no arguments
-      {
+      if (count_cmd_args() == 1)  {
         // Don't use the 'ls()' method in the SdFat library as it does not
         // limit recursion into subdirectories.
         command_arg[0] = '*';       // use global wildcard
         command_arg[1] = '\0';
-      }
-      else      // has argument (and possible wildcards)
-      {
+      }else{
         command_arg = get_cmd_arg(1);
         strupr(command_arg);
       }
       // display listing with limited recursion into subdirectories
       lsPrint(&currentDirectory, command_arg, LS_SIZE | LS_R, 0);
-
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-      command_succedded = 1;
-#endif
-
+      command_succeeded = 1;
     }
-    else if(strcmp_P(command_arg, PSTR("md")) == 0)
-    {
+//--------------------------------------------------------------
+    else if(strcmp_P(command_arg, PSTR("md")) == 0) {
       //Argument 2: Directory name
       command_arg = get_cmd_arg(1);
       if(command_arg == 0)
@@ -1115,26 +476,23 @@ void command_shell(void)
 
       SdFile newDirectory;
       if (!newDirectory.makeDir(&currentDirectory, command_arg)) {
-        if ((feedback_mode & EXTENDED_INFO) > 0)
+        if ((feedback_mode & feedback_bits::extended_info) > 0)
         {
           NewSerial.print(F("error creating directory: "));
           NewSerial.println(command_arg);
         }
       }
-#ifdef INCLUDE_SIMPLE_EMBEDDED
       else
       {
-        command_succedded = 1;
+        command_succeeded = 1;
       }
-#endif
-
     }
+//----------------------------------------------------------
     //NOTE on using "rm <option>/<file> <subfolder>"
     // "rm -rf <subfolder>" removes the <subfolder> and all contents recursively
     // "rm <subfolder>" removes the <subfolder> only if its empty
     // "rm <filename>" removes the <filename>
-    else if(strcmp_P(command_arg, PSTR("rm")) == 0)
-    {
+    else if(strcmp_P(command_arg, PSTR("rm")) == 0) {
       //Argument 2: Remove option or file name/subdirectory to remove
       command_arg = get_cmd_arg(1);
       if(command_arg == 0)
@@ -1148,9 +506,7 @@ void command_shell(void)
         {
           tmp_var = tempFile.rmRfStar();
           tempFile.close();
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-          command_succedded = tmp_var;
-#endif
+          command_succeeded = tmp_var;
         }
         continue;
       }
@@ -1167,9 +523,7 @@ void command_shell(void)
           if (tempFile.open(&currentDirectory, command_arg, O_WRITE))
             tmp_var = tempFile.remove();
         }
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-        command_succedded = tmp_var;
-#endif
+        command_succeeded = tmp_var;
         tempFile.close();
         continue;
       }
@@ -1204,32 +558,28 @@ void command_shell(void)
         tempFile.close();
       }
 
-      if ((feedback_mode & EXTENDED_INFO) > 0)
+      if ((feedback_mode & feedback_bits::extended_info) > 0)
       {
         NewSerial.print(filesDeleted);
         NewSerial.println(F(" file(s) deleted"));
       }
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-      if (filesDeleted > 0)
-        command_succedded = 1;
-#endif
+      if (filesDeleted > 0){
+        command_succeeded = 1;
+      }
     }
-    else if(strcmp_P(command_arg, PSTR("cd")) == 0)
-    {
+//----------------------------------------------------------------------
+    else if(strcmp_P(command_arg, PSTR("cd")) == 0){
       //Argument 2: Directory name
       command_arg = get_cmd_arg(1);
-      if(command_arg == 0)
+      if(command_arg == 0){
         continue;
-
+      }
       //open directory
       tmp_var = gotoDir(command_arg);
-
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-      command_succedded = tmp_var;
-#endif
+      command_succeeded = tmp_var;
     }
-    else if(strcmp_P(command_arg, PSTR("read")) == 0)
-    {
+//---------------------------------------------------------
+    else if(strcmp_P(command_arg, PSTR("read")) == 0) {
       //Argument 2: File name
       command_arg = get_cmd_arg(1);
       if(command_arg == 0)
@@ -1237,7 +587,7 @@ void command_shell(void)
 
       //search file in current directory and open it
       if (!tempFile.open(&currentDirectory, command_arg, O_READ)) {
-        if ((feedback_mode & EXTENDED_INFO) > 0)
+        if ((feedback_mode & feedback_bits::extended_info) > 0)
         {
           NewSerial.print(F("Failed to open file "));
           NewSerial.println(command_arg);
@@ -1247,10 +597,10 @@ void command_shell(void)
 
       //Argument 3: File seek position
       if ((command_arg = get_cmd_arg(2)) != 0) {
-        if ((command_arg = is_number(command_arg, strlen(command_arg))) != 0) {
+        if ( is_number(command_arg, strlen(command_arg))) {
           int32_t offset = strtolong(command_arg);
           if(!tempFile.seekSet(offset)) {
-            if ((feedback_mode & EXTENDED_INFO) > 0)
+            if ((feedback_mode & feedback_bits::extended_info) > 0)
             {
               NewSerial.print(F("Error seeking to "));
               NewSerial.println(command_arg);
@@ -1263,53 +613,59 @@ void command_shell(void)
 
       //Argument 4: How much data (number of characters) to read from file
       uint32_t readAmount = (uint32_t)-1;
-      if ((command_arg = get_cmd_arg(3)) != 0)
-        if ((command_arg = is_number(command_arg, strlen(command_arg))) != 0)
+      if ((command_arg = get_cmd_arg(3)) != 0){
+        if (is_number(command_arg, strlen(command_arg))){
           readAmount = strtolong(command_arg);
+         }
+      }
 
       //Argument 5: Should we print ASCII or HEX? 1 = ASCII, 2 = HEX, 3 = RAW
       uint32_t printType = 1; //Default to ASCII
-      if ((command_arg = get_cmd_arg(4)) != 0)
-        if ((command_arg = is_number(command_arg, strlen(command_arg))) != 0)
+      if ((command_arg = get_cmd_arg(4)) != 0){
+        if (is_number(command_arg, strlen(command_arg))){
           printType = strtolong(command_arg);
+        }
+      }
 
       //Print file contents from current seek position to the end (readAmount)
-      byte c;
-      int16_t v;
-      int16_t readSpot = 0;
-      while ((v = tempFile.read()) >= 0) {
-        //file.read() returns a 16 bit character. We want to be able to print extended ASCII
-        //So we need 8 bit unsigned.
-        c = v; //Force the 16bit signed variable into an 8bit unsigned
+      uint32_t readSpot = 0;
+    //  while ( (int16_t v = tempFile.read()) >= 0) {
+        for(;;){
+         int16_t v = tempFile.read();
+         if ( v >= 0){
+           //file.read() returns a 16 bit character. We want to be able to print extended ASCII
+           //So we need 8 bit unsigned.
+           byte c = v; //Force the 16bit signed variable into an 8bit unsigned
 
-        if(++readSpot > static_cast<int>(readAmount)) break;
-        if(printType == 1) { //Printing ASCII
-          //Test character to see if it is visible, if not print '.'
-          if(c >= ' ' && c < 127)
-            NewSerial.write(c); //Regular ASCII
-          else if (c == '\n' || c == '\r')
-            NewSerial.write(c); //Go ahead and print the carriage returns and new lines
-          else
-            NewSerial.write(F(".")); //For non visible ASCII characters, print a .
-        }
-        else if (printType == 2) {
-          NewSerial.print(c, HEX); //Print in HEX
-          NewSerial.print(F(" "));
-        }
-        else if (printType == 3) {
-          NewSerial.write(c); //Print raw
-        }
-
+           if(++readSpot > readAmount) break;
+           if(printType == 1) { //Printing ASCII
+             //Test character to see if it is visible, if not print '.'
+             if(c >= ' ' && c < 127)
+               NewSerial.write(c); //Regular ASCII
+             else if (c == '\n' || c == '\r')
+               NewSerial.write(c); //Go ahead and print the carriage returns and new lines
+             else
+               NewSerial.write(F(".")); //For non visible ASCII characters, print a .
+           }
+           else if (printType == 2) {
+             NewSerial.print(c, HEX); //Print in HEX
+             NewSerial.print(F(" "));
+           }
+           else if (printType == 3) {
+             NewSerial.write(c); //Print raw
+           }
+         }else{
+            break;
+         }
       }
       tempFile.close();
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-      command_succedded = 1;
-      if ((feedback_mode & EMBEDDED_END_MARKER) == 0)
-#endif
+      command_succeeded = 1;
+      if ((feedback_mode & feedback_bits::end_marker) == 0){
         NewSerial.println();
+      }
     }
-    else if(strcmp_P(command_arg, PSTR("write")) == 0)
-    {
+//--------------------------------------------------------------------
+    else if(strcmp_P(command_arg, PSTR("write")) == 0){
       //Argument 2: File name
       command_arg = get_cmd_arg(1);
       if(command_arg == 0)
@@ -1317,8 +673,7 @@ void command_shell(void)
 
       //search file in current directory and open it
       if (!tempFile.open(&currentDirectory, command_arg, O_WRITE)) {
-        if ((feedback_mode & EXTENDED_INFO) > 0)
-        {
+        if ((feedback_mode & feedback_bits::extended_info) > 0) {
           NewSerial.print(F("Failed to open file "));
           NewSerial.println(command_arg);
         }
@@ -1327,10 +682,10 @@ void command_shell(void)
 
       //Argument 3: File seek position
       if ((command_arg = get_cmd_arg(2)) != 0){
-        if ((command_arg = is_number(command_arg, strlen(command_arg))) != 0) {
+        if (is_number(command_arg, strlen(command_arg))) {
           int32_t offset = strtolong(command_arg);
           if(!tempFile.seekSet(offset)) {
-            if ((feedback_mode & EXTENDED_INFO) > 0)
+            if ((feedback_mode & feedback_bits::extended_info) > 0)
             {
               NewSerial.print(F("Error seeking to "));
               NewSerial.println(command_arg);
@@ -1344,18 +699,18 @@ void command_shell(void)
       //read text from the shell and write it to the file
       byte dataLen;
       while(1) {
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-        if ((feedback_mode & EMBEDDED_END_MARKER) > 0)
+//#ifdef INCLUDE_SIMPLE_EMBEDDED
+        if ((feedback_mode & feedback_bits::end_marker) > 0)
           NewSerial.print((char)0x1A); // Ctrl+Z ends the data and marks the start of result
-#endif
+//#endif
         NewSerial.print(F("<")); //give a different prompt
 
         //read one line of text
         dataLen = read_line(buffer, sizeof(buffer));
         if(!dataLen) {
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-          command_succedded = 1;
-#endif
+//#ifdef INCLUDE_SIMPLE_EMBEDDED
+          command_succeeded = 1;
+//#endif
           break;
         }
         
@@ -1371,18 +726,19 @@ void command_shell(void)
 
         //write text to file
         if(tempFile.write((byte*) buffer, dataLen) != dataLen) {
-          if ((feedback_mode & EXTENDED_INFO) > 0)
+          if ((feedback_mode & feedback_bits::extended_info) > 0)
             NewSerial.print(F("error writing to file\n\r"));
           break;
         }
-
-        if(dataLen < (sizeof(buffer) - 1)) tempFile.write("\n\r", 2); //If we didn't fill up the buffer then user must have sent NL. Append new line and return
+        //If we didn't fill up the buffer then user must have sent NL. Append new line and return
+        if(dataLen < (sizeof(buffer) - 1)) tempFile.write("\n\r", 2); 
+        
       }
 
       tempFile.close();
     }
-    else if(strcmp_P(command_arg, PSTR("size")) == 0)
-    {
+//-------------------------------------------------------
+    else if(strcmp_P(command_arg, PSTR("size")) == 0) {
       //Argument 2: File name - no wildcard search
       command_arg = get_cmd_arg(1);
       if(command_arg == 0)
@@ -1392,22 +748,22 @@ void command_shell(void)
       if (tempFile.open(&currentDirectory, command_arg, O_READ)) {
         NewSerial.print(tempFile.fileSize());
         tempFile.close();
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-        command_succedded = 1;
-#endif
+//#ifdef INCLUDE_SIMPLE_EMBEDDED
+        command_succeeded = 1;
+//#endif
       }
       else
       {
-        if ((feedback_mode & EXTENDED_INFO) > 0)
+        if ((feedback_mode & feedback_bits::extended_info) > 0)
           NewSerial.print(F("-1")); //Indicate no file is found
       }
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-      if ((feedback_mode & EMBEDDED_END_MARKER) == 0)
-#endif
+//#ifdef INCLUDE_SIMPLE_EMBEDDED
+      if ((feedback_mode & feedback_bits::end_marker) == 0)
+//#endif
         NewSerial.println();
     }
-    else if(strcmp_P(command_arg, PSTR("disk")) == 0)
-    {
+//----------------------------------------------------------
+    else if(strcmp_P(command_arg, PSTR("disk")) == 0) {
       //Print card type
       NewSerial.print(F("\nCard type: "));
       switch(card.type()) {
@@ -1469,30 +825,29 @@ void command_shell(void)
       //7761920 = 8GB card
       //994816 = 1GB card
       NewSerial.println(F(" KB"));
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-      command_succedded = 1;
-#endif
+//#ifdef INCLUDE_SIMPLE_EMBEDDED
+      command_succeeded = 1;
+//#endif
     }
-    else if(strcmp_P(command_arg, PSTR("sync")) == 0)
-    {
+//--------------------------------------------------------
+    else if(strcmp_P(command_arg, PSTR("sync")) == 0){
       //Flush all current data and record it to card
       //This isn't really tested.
       tempFile.sync();
       currentDirectory.sync();
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-      command_succedded = 1;
-#endif
+//#ifdef INCLUDE_SIMPLE_EMBEDDED
+      command_succeeded = 1;
+//#endif
     }
-
+//----------------------------------------------------
     //Reset the AVR
     else if(strcmp_P(command_arg, PSTR("reset")) == 0)
     {
       Reset_AVR();
     }
-
+//-------------------------------------------------------
     //Create new file
-    else if(strcmp_P(command_arg, PSTR("new")) == 0)
-    {
+    else if(strcmp_P(command_arg, PSTR("new")) == 0) {
       //Argument 2: File name
       command_arg = get_cmd_arg(1);
       if(command_arg == 0)
@@ -1501,38 +856,33 @@ void command_shell(void)
       //Try to open file, if fail (file doesn't exist), then break
       if (tempFile.open(&currentDirectory, command_arg, O_CREAT | O_EXCL | O_WRITE)) {//Will fail if file already exsists
         tempFile.close(); //Everything is good, Close this new file we just opened
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-        command_succedded = 1;
-#endif
+//#ifdef INCLUDE_SIMPLE_EMBEDDED
+        command_succeeded = 1;
+//#endif
       }
       else
       {
-        if ((feedback_mode & EXTENDED_INFO) > 0) {
+        if ((feedback_mode & feedback_bits::extended_info) > 0) {
           NewSerial.print(F("Error creating file: "));
           NewSerial.println(command_arg);
         }
       }
     }
-
+//-------------------------------------------------------------
     //Append to a current file
-    else if(strcmp_P(command_arg, PSTR("append")) == 0)
-    {
+    else if(strcmp_P(command_arg, PSTR("append")) == 0){
       //Argument 2: File name
       //Find the end of a current file and begins writing to it
       //Ends only when the user inputs Ctrl+z (ASCII 26)
       command_arg = get_cmd_arg(1);
-      if(command_arg == 0)
+      if(command_arg == 0){
         continue;
+      }
       //append_file: Uses circular buffer to capture full stream of text and append to file
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-      command_succedded = append_file(command_arg);
-#else
-      append_file(command_arg);
-#endif
+      command_succeeded = append_file(command_arg);
     }
-
-    else if(strcmp_P(command_arg, PSTR("pwd")) == 0)
-    {
+//---------------------------------------------------------
+    else if(strcmp_P(command_arg, PSTR("pwd")) == 0) {
       NewSerial.print(F(".\\"));
       tmp_var = getNextFolderTreeIndex();
       for (byte i = 0; i < tmp_var; i++)
@@ -1541,129 +891,18 @@ void command_shell(void)
         if (i < tmp_var-1) NewSerial.print(F("\\"));
       }
       NewSerial.println();
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-      command_succedded = 1;
-#endif
+      command_succeeded = 1;
     }
-    // echo <on>|<off>
-    else if(strcmp_P(command_arg, PSTR("echo")) == 0)
-    {
-      //Argument 2: <on>|<off>
-      // Set if we are going to echo the characters back to the client or not
-      command_arg = get_cmd_arg(1);
-      if (command_arg != 0)
-      {
-        if ((tmp_var = strcmp_P(command_arg, PSTR("on"))) == 0) {
-          setting_echo = ON;
-          feedback_mode |= ECHO;
-        }
-        else if ((tmp_var = strcmp_P(command_arg, PSTR("off"))) == 0) {
-          setting_echo = OFF;
-          feedback_mode &= ((byte)~ECHO); 
-        }
-
-        EEPROM.write(LOCATION_ECHO, setting_echo); //Commit this setting to EEPROM
-        record_config_file(); //Put this new setting into the config file
-
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-          command_succedded = (tmp_var == 0);
-#endif
-      }
-    }
-    // verbose <on>|<off>
-    else if(strcmp_P(command_arg, PSTR("verbose")) == 0)
-    {
-      //Argument 2: <on>|<off>
-      // Set if we are going to show extended error information when executing commands
-      command_arg = get_cmd_arg(1);
-      if (command_arg != 0)
-      {
-        if ((tmp_var = strcmp_P(command_arg, PSTR("on"))) == 0) {
-          setting_verbose = ON;
-          feedback_mode |= EXTENDED_INFO;
-        }
-        else if ((tmp_var = strcmp_P(command_arg, PSTR("off"))) == 0) {
-          setting_verbose = OFF;
-          feedback_mode &= ((byte)~EXTENDED_INFO);
-        }
-
-        EEPROM.write(LOCATION_VERBOSE, setting_verbose); //Commit this setting to EEPROM
-        record_config_file(); //Put this new setting into the config file
-
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-          command_succedded = (tmp_var == 0);
-#endif
-      }
-    }
-#ifdef INCLUDE_SIMPLE_EMBEDDED
-    //http://code.google.com/p/sdfatlib/issues/detail?id=11 by EdfeldtPeem (Embedded End Marker) <on>|<off>
-    else if(strcmp_P(command_arg, PSTR("eem")) == 0)
-    {
-      //Argument 2: <on>|<off>
-      //Set if we are going to enable char 26 (Ctrl+z) as end-of-data
-      //marker to separate the returned data and the actual
-      //result of the operation
-      command_arg = get_cmd_arg(1);
-      if (command_arg != 0)
-      {
-        if ((tmp_var = strcmp_P(command_arg, PSTR("on"))) == 0)
-          feedback_mode |= EMBEDDED_END_MARKER;
-        else if ((tmp_var = strcmp_P(command_arg, PSTR("off"))) == 0)
-          feedback_mode &= ((byte)~EMBEDDED_END_MARKER);
-
-        command_succedded = (tmp_var == 0);
-      }
-    }
-
-    /*
-//ERROR
-     //The function *.fileInfo is no yet supported by sdfatlib beta 20120108
-     
-     // ecountf
-     // returns the number of files in current folder |count|
-     else if(strcmp_P(command_arg, F("efcount")) == 0)
-     {
-     //Argument 2: wild card search
-     command_arg = get_cmd_arg(1);
-     file_index = 0;
-     
-     NewSerial.print(F("count|"));
-     Serial.println(currentDirectory.fileInfo(FI_COUNT, 0, buffer));
-     command_succedded = 1;
-     }
-     // efname <file index>
-     // Returns the name and the size of a file <name>|<size>
-     else if(strcmp_P(command_arg, F("efinfo")) == 0)
-     {
-     //Argument 2: File index
-     command_arg = get_cmd_arg(1);
-     if (command_arg != 0)
-     {
-     // File index should always be a number
-     if ((command_arg = is_number(command_arg, strlen(command_arg))) != 0)
-     {
-     file_index = strtolong(command_arg);
-     memset(buffer, 0, sizeof(buffer));
-     uint32_t size = currentDirectory.fileInfo(FI_INFO, file_index, buffer);
-     NewSerial.print(buffer);
-     NewSerial.print('|');
-     NewSerial.println(size);
-     command_succedded = 1;
-     }
-     }
-     }
-     */
-#endif //INCLUDE_SIMPLE_EMBEDDED
-
+//---------------------------------------------------------
     else
     {
-      if ((feedback_mode & EXTENDED_INFO) > 0) {
+      if ((feedback_mode & feedback_bits::extended_info) > 0) {
         NewSerial.print(F("unknown command: "));
         NewSerial.println(command_arg);
       }
     }
+//--------------------------------------------------------
   }
-
   //Do we ever get this far?
   NewSerial.print(F("Exiting: closing down\n"));
 }
@@ -1672,16 +911,14 @@ void command_shell(void)
 byte read_line(char* buffer, byte buffer_length)
 {
 
-  memset(buffer, 0, buffer_length); //Clear buffer
+  memset(buffer, 0, buffer_length); 
 
   byte read_length = 0;
   while(read_length < buffer_length - 1) {
     while (!NewSerial.available());
     byte c = NewSerial.read();
 
-    //This fails to compile in Arduino 1.6.1
-    //STAT1_PORT ^= (1<<STAT1); //Blink the stat LED while typing
-    toggleLED(statled1);
+    toggleLED(statled1.pin);
 
     if(c == 0x08 || c == 0x7f) { //Backspace characters
       if(read_length < 1)
@@ -1698,8 +935,9 @@ byte read_line(char* buffer, byte buffer_length)
     }
 
     // Only echo back if this is enabled
-    if ((feedback_mode & ECHO) > 0)
+    if ((feedback_mode & feedback_bits::echo)){
       NewSerial.print((char)c);
+    }
 
     if(c == '\r') {
       NewSerial.println();
@@ -1736,46 +974,34 @@ byte read_line(char* buffer, byte buffer_length)
   return read_length;
 }
 
-//We no longer use hardware receive, instead, we use the original .receive and .available
-/*byte uart_getc(void)
- {
- while(!(UCSR0A & _BV(RXC0)));
- 
- byte b = UDR0;
- 
- return b;
- }*/
-
 int8_t getNextFolderTreeIndex()
 {
   int8_t i;
-  for (i = 0; i < FOLDER_TRACK_DEPTH; i++)
+  for (i = 0; i < max_folder_depth; i++)
     if (strlen(folderTree[i]) == 0)
       return i;
 
-  if (i >= FOLDER_TRACK_DEPTH)
+  if (i >= max_folder_depth)
     i = -1;
 
   return i;
 }
 
-byte gotoDir(char *dir)
+byte gotoDir(const char *dir)
 {
   SdFile subDirectory;
   byte tmp_var = 0;
 
   //Goto parent directory
   //@NOTE: This is a fix to make this work. Should be replaced with
-  //proper handling. Limitation: FOLDER_TRACK_DEPTH subfolders
+  //proper handling. Limitation: max_folder_depth subfolders
   //ERROR  if (strcmp_P(dir, F("..")) == 0) {
   if (strcmp_P(dir, PSTR("..")) == 0) {
     tmp_var = 1;
-
     //close file system
     currentDirectory.close();
-
     // open the root directory
-    if (!currentDirectory.openRoot(&volume)) systemError(ERROR_ROOT_INIT);
+    if (!currentDirectory.openRoot(&volume)) systemError(error_code::root_init);
     int8_t index = getNextFolderTreeIndex() - 1;
     if (index >= 0)
     {
@@ -1789,7 +1015,7 @@ byte gotoDir(char *dir)
       }
       memset(folderTree[index], 0, 11);
     }
-    if (((feedback_mode & EXTENDED_INFO) > 0) && (tmp_var == 0))
+    if (((feedback_mode & feedback_bits::extended_info) > 0) && (tmp_var == 0))
     {
       NewSerial.print(F("cannot cd to parent directory: "));
       NewSerial.println(dir);
@@ -1798,7 +1024,7 @@ byte gotoDir(char *dir)
   else
   {
     if (!(tmp_var = subDirectory.open(&currentDirectory, dir, O_READ))) {
-      if ((feedback_mode & EXTENDED_INFO) > 0)
+      if ((feedback_mode & feedback_bits::extended_info) > 0)
       {
         NewSerial.print(F("directory not found: "));
         NewSerial.println(dir);
@@ -1819,225 +1045,18 @@ void print_menu(void)
 {
   NewSerial.println(F("OpenLog v3.3"));
   NewSerial.println(F("Basic commands:"));
-  NewSerial.println(F("new <file>\t\t: Creates <file>"));
-  NewSerial.println(F("append <file>\t\t: Appends text to end of <file>"));
-
-  //NewSerial.println(F("write <file> <offset>\t: Writes text to <file>, starting from <offset>. The text is read from the UART, line by line. Finish with an empty line"));
-  //NewSerial.println(F("rm <file>\t\t: Deletes <file>. Use wildcard to do a wildcard removal of files"));
-
-  NewSerial.println(F("md <directory>\t\t: Creates a <directory>"));
-
-  //NewSerial.println(F("cd <directory>\t\t: Changes current working directory to <directory>"));
-  //NewSerial.println(F("cd ..\t\t: Changes to lower directory in tree"));
-
-  NewSerial.println(F("ls\t\t\t: Shows the content of the current directory.."));
-  NewSerial.println(F("read <file> <start> <length> <type>: Outputs <length> bytes of <file> to the terminal starting at <start>. Omit <start> and <length> to read whole file. <type> 1 prints in ASCII, 2 in HEX."));
-  NewSerial.println(F("size <file>\t\t: Write size of <file> to terminal"));
-  NewSerial.println(F("disk\t\t\t: Shows card information"));
-
-  //NewSerial.println(F("init\t\t\t: Reinitializes and reopens the memory card"));
-  //NewSerial.println(F("sync\t\t\t: Ensures all buffered data is written to the card"));
-
-  NewSerial.println(F("reset\t\t\t: Causes unit to reset, uses parameters in config file"));
-  NewSerial.println(F("set\t\t\t: Menu to configure system mode"));
-  NewSerial.println(F("baud\t\t\t: Menu to configure baud rate"));
-}
-
-//Configure what baud rate to communicate at
-void baud_menu(void)
-{
-  long uartSpeed = readBaud();
-
-  NewSerial.print(F("\n\rCurrent rate: "));
-  NewSerial.print(uartSpeed, DEC);
-  NewSerial.println(F(" bps"));
-
-  NewSerial.println(F("Enter new baud rate ('x' to exit):"));
-
-  //Print prompt
-  NewSerial.print(F(">"));
-
-  //Read user input
-  char newBaud[8]; //Max at 1000000
-  read_line(newBaud, sizeof(newBaud));
-
-  if(newBaud[0] == 'x')
-  {
-    NewSerial.println(F("Exiting"));
-    return; //Look for escape character
-  }
-
-  long newRate = strtolong(newBaud); //Convert this string to a long
-
-  if(newRate < BAUD_MIN || newRate > BAUD_MAX)
-  {
-    NewSerial.println(F("Out of bounds"));
-  }
-  else
-  {
-    NewSerial.print(F("Going to "));
-    NewSerial.print(newRate);
-    NewSerial.println(F("bps"));
-
-    //Record this new baud rate
-    writeBaud(newRate);
-    record_config_file(); //Put this new setting into the config file
-    blink_error(ERROR_NEW_BAUD);
-    //Do nothing. Unit will now be in infinite blink_error loop
-  }
-}
-
-
-//Change how OpenLog works
-//1) Turn on unit, unit will create new file, and just start logging
-//2) Turn on, append to known file, and just start logging
-//3) Turn on, sit at command prompt
-//4) Resets the newlog file number to zero
-void system_menu(void)
-{
-  byte system_mode = EEPROM.read(LOCATION_SYSTEM_SETTING);
-
-  while(1)
-  {
-    NewSerial.println(F("\r\nSystem Configuration"));
-
-    NewSerial.print(F("Current boot mode: "));
-    if(system_mode == MODE_NEWLOG) NewSerial.print(F("New file"));
-    if(system_mode == MODE_SEQLOG) NewSerial.print(F("Append file"));
-    if(system_mode == MODE_COMMAND) NewSerial.print(F("Command"));
-    NewSerial.println();
-
-    NewSerial.print(F("Current escape character and amount: "));
-    NewSerial.print(setting_escape_character, DEC);
-    NewSerial.print(F(" x "));
-    NewSerial.println(setting_max_escape_character, DEC);
-
-    NewSerial.println(F("Change to:"));
-    NewSerial.println(F("1) New file logging"));
-    NewSerial.println(F("2) Append file logging"));
-    NewSerial.println(F("3) Command prompt"));
-    NewSerial.println(F("4) Reset new file number"));
-    NewSerial.println(F("5) New escape character"));
-    NewSerial.println(F("6) Number of escape characters"));
-
-#if DEBUG
-    NewSerial.println(F("a) Clear all user settings"));
-#endif
-
-    NewSerial.println(F("x) Exit"));
-    //Print prompt
-    NewSerial.print(F(">"));
-
-    //Read command
-    while(!NewSerial.available());
-    char command = NewSerial.read();
-
-    //Execute command
-    if(command == '1')
-    {
-      NewSerial.println(F("New file logging"));
-      EEPROM.write(LOCATION_SYSTEM_SETTING, MODE_NEWLOG);
-      record_config_file(); //Put this new setting into the config file
-      return;
-    }
-    if(command == '2')
-    {
-      NewSerial.println(F("Append file logging"));
-      EEPROM.write(LOCATION_SYSTEM_SETTING, MODE_SEQLOG);
-      record_config_file(); //Put this new setting into the config file
-      return;
-    }
-    if(command == '3')
-    {
-      NewSerial.println(F("Command prompt"));
-      EEPROM.write(LOCATION_SYSTEM_SETTING, MODE_COMMAND);
-      record_config_file(); //Put this new setting into the config file
-      return;
-    }
-    if(command == '4')
-    {
-      NewSerial.println(F("New file number reset to zero"));
-      EEPROM.write(LOCATION_FILE_NUMBER_LSB, 0);
-      EEPROM.write(LOCATION_FILE_NUMBER_MSB, 0);
-
-      //65533 log testing
-      //EEPROM_write(LOCATION_FILE_NUMBER_LSB, 0xFD);
-      //EEPROM_write(LOCATION_FILE_NUMBER_MSB, 0xFF);
-      return;
-    }
-    if(command == '5')
-    {
-      NewSerial.print(F("Enter a new escape character: "));
-
-      while(!NewSerial.available()); //Wait for user to hit character
-      setting_escape_character = NewSerial.read();
-
-      EEPROM.write(LOCATION_ESCAPE_CHAR, setting_escape_character);
-      record_config_file(); //Put this new setting into the config file
-
-        NewSerial.print(F("\n\rNew escape character: "));
-      NewSerial.println(setting_escape_character, DEC);
-      return;
-    }
-    if(command == '6')
-    {
-      byte choice = 255;
-      while(choice == 255)
-      {
-        NewSerial.print(F("\n\rEnter number of escape characters to look for (0 to 254): "));
-        while(!NewSerial.available()); //Wait for user to hit character
-        choice = NewSerial.read() - '0';
-      }
-
-      setting_max_escape_character = choice;
-      EEPROM.write(LOCATION_MAX_ESCAPE_CHAR, setting_max_escape_character);
-      record_config_file(); //Put this new setting into the config file
-
-        NewSerial.print(F("\n\rNumber of escape characters needed: "));
-      NewSerial.println(setting_max_escape_character, DEC);
-      return;
-    }
-
-#if DEBUG
-    //This allows us to reset the EEPROM and config file on a unit to see what would happen to an 
-    //older unit that is upgraded/reflashed to newest firmware
-    if(command == 'a')
-    {
-      EEPROM.write(LOCATION_BAUD_SETTING, 0xFF);
-      EEPROM.write(LOCATION_SYSTEM_SETTING, 0xFF);
-      EEPROM.write(LOCATION_FILE_NUMBER_LSB, 0xFF);
-      EEPROM.write(LOCATION_FILE_NUMBER_MSB, 0xFF);
-      EEPROM.write(LOCATION_ESCAPE_CHAR, 0xFF);
-      EEPROM.write(LOCATION_MAX_ESCAPE_CHAR, 0xFF);
-
-      //Remove the config file if it is there
-      SdFile rootDirectory;
-      if (!rootDirectory.openRoot(&volume)) error("openRoot"); // open the root directory
-
-      char configFileName[strlen(CFG_FILENAME)];
-      strcpy_P(configFileName, PSTR(CFG_FILENAME)); //This is the name of the config file. 'config.sys' is probably a bad idea.
-
-      //If there is currently a config file, trash it
-      if (file.open(&rootDirectory, configFileName, O_WRITE)) {
-        NewSerial.println(F("Deleting config"));
-        if (!file.remove()){
-          NewSerial.println(F("Remove config failed")); 
-          return;
-        }
-      }
-
-      NewSerial.println(F("Unit has been reset. Please power cycle"));
-      while(1);
-    }
-#endif
-
-    if(command == 'x')
-    {
-      //Do nothing, just exit
-      NewSerial.println(F("Exiting"));
-      return;
-    }
-  }
+  NewSerial.println(F("new <file>\t\t: Create <file>"));
+  NewSerial.println(F("append <file>\t\t: Append <file>"));
+  NewSerial.println(F("write <file> <offset>\t: Write text to <file>, Finish with empty line"));
+  NewSerial.println(F("rm <file>\t\t: Delete <file>. Can use \'*\' wildcard"));
+  NewSerial.println(F("md <dir>\t\t: Create <dir>"));
+  NewSerial.println(F("cd <dir>\t\t: Change directory to <dir>"));
+  NewSerial.println(F("cd ..\t\t: Change to parent directory"));
+  NewSerial.println(F("ls\t\t\t: List current directory"));
+  NewSerial.println(F("read <file> [<start>] [<length>][ <type>]: Output file"));
+  NewSerial.println(F("size <file>\t\t: show size of <file>"));
+  NewSerial.println(F("disk\t\t\t: Shows card info"));
+  NewSerial.println(F("reset\t\t\t: reset"));
 }
 
 //A rudimentary way to convert a string to a long 32 bit integer
@@ -2045,9 +1064,9 @@ void system_menu(void)
 uint32_t strtolong(const char* str)
 {
   uint32_t l = 0;
-  while(*str >= '0' && *str <= '9')
+  while(*str >= '0' && *str <= '9'){
     l = l * 10 + (*str++ - '0');
-
+  }
   return l;
 }
 
@@ -2055,8 +1074,8 @@ uint32_t strtolong(const char* str)
 byte count_cmd_args(void)
 {
   byte count = 0;
-  byte i = 0;
-  for(; i < MAX_COUNT_COMMAND_LINE_ARGS; i++)
+ 
+  for( byte i = 0; i < max_commandline_args; i++)
     if((cmd_arg[i].arg != 0) && (cmd_arg[i].arg_length > 0))
       count++;
 
@@ -2069,7 +1088,7 @@ char general_buffer[30]; //Needed for command shell
 char* get_cmd_arg(byte index)
 {
   memset(general_buffer, 0, sizeof(general_buffer));
-  if (index < MAX_COUNT_COMMAND_LINE_ARGS)
+  if (index < max_commandline_args)
     if ((cmd_arg[index].arg != 0) && (cmd_arg[index].arg_length > 0))
       return strncpy(general_buffer, cmd_arg[index].arg, MIN(sizeof(general_buffer), cmd_arg[index].arg_length));
 
@@ -2077,10 +1096,10 @@ char* get_cmd_arg(byte index)
 }
 
 //Safe adding of command line arguments
-void add_cmd_arg(char* buffer, byte buffer_length)
+void add_cmd_arg(const char* buffer, byte buffer_length)
 {
   byte count = count_cmd_args();
-  if (count < MAX_COUNT_COMMAND_LINE_ARGS)
+  if (count < max_commandline_args)
   {
     cmd_arg[count].arg = buffer;
     cmd_arg[count].arg_length = buffer_length;
@@ -2094,29 +1113,24 @@ void add_cmd_arg(char* buffer, byte buffer_length)
 //	arg[1] -> <filename>
 //	arg[2] -> <start>
 //	arg[3] -> <end>
-byte split_cmd_line_args(char* buffer, byte buffer_length)
+byte split_cmd_line_args(const char* buffer, byte buffer_length)
 {
   byte arg_index_start = 0;
   byte arg_index_end = 1;
-
   //Reset command line arguments
   memset(cmd_arg, 0, sizeof(cmd_arg));
-
   //Split the command line arguments
-  while (arg_index_end < buffer_length)
-  {
+  while (arg_index_end < buffer_length){
     //Search for ASCII 32 (Space)
-    if ((buffer[arg_index_end] == ' ') || (arg_index_end + 1 == buffer_length))
-    {
+    if ((buffer[arg_index_end] == ' ') || (arg_index_end + 1 == buffer_length)) {
       //Fix for last character
-      if (arg_index_end + 1 == buffer_length)
+      if (arg_index_end + 1 == buffer_length){
         arg_index_end = buffer_length;
-
+      }
       //Add this command line argument to the list
       add_cmd_arg(&(buffer[arg_index_start]), (arg_index_end - arg_index_start));
       arg_index_start = ++arg_index_end;
     }
-
     arg_index_end++;
   }
 
@@ -2129,13 +1143,14 @@ byte split_cmd_line_args(char* buffer, byte buffer_length)
 
 //Returns char* pointer to buffer if buffer is a valid number or
 //0(null) if not.
-char* is_number(char* buffer, byte buffer_length)
+bool is_number(const char* buffer, byte buffer_length)
 {
-  for (int i = 0; i < buffer_length; i++)
-    if (!isdigit(buffer[i]))
-      return 0;
-
-  return buffer;
+  for (int i = 0; i < buffer_length; i++){
+    if (!isdigit(buffer[i])){
+      return false;
+    }
+  }
+  return true;
 }
 void removeErrorCallback(const char* fileName)
 {
@@ -2188,80 +1203,41 @@ byte wildcmp(const char* wild, const char* string)
   return !(*wild);
 }
 
-//End wildcard functions
-//=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+struct print_tree_status{
+   static constexpr byte eof = 0;
+   static constexpr byte file = 1;
+   static constexpr byte subdir = 2;
+};
 
-//------------------------------------------------------------------------------
-// Listing functions
-//  - Modeled loosely on the ls() methods in SdBaseFile.cpp from the SdFat library.
-// Written by dlkeng in relation to issue 135 https://github.com/sparkfun/OpenLog/issues/135
-
-#define WAS_EOF             0
-#define WAS_FILE            1
-#define WAS_SUBDIR          2
-#define FILENAME_EXT_SIZE   13
-#define LS_FIELD_SIZE       (FILENAME_EXT_SIZE + 1)
-#define SUBDIR_INDENT       2
-#define DIR_SIZE            (sizeof(dir_t))
-
-/*
- * NAME:
- *  void lsPrint(SdFile * theDir, char * cmdStr, byte flags, byte indent)
- *
- * PARAMETERS:
- *  SdFile * theDir = the directory to list (assumed opened)
- *  char * cmdStr = the command line file/directory string (with possible wildcards)
- *  byte flags = the inclusive OR of
- *                  LS_SIZE - print the file size
- *                  LS_R - recursively list subdirectories
- *  byte indent = amount of space before file name
- *                (used for recursive list to indicate subdirectory level)
- *
- * WHAT:
- *  List directory contents to serial port.
- *
- *  Wildcard support rules:
- *    Wildcard characters ('*', '?') only apply to the selection of filenames to
- *    list, not to the listing of directory or subdirectory names. All directory
- *    and subdirectory names are always listed.
- *
- * RETURN VALUES:
- *  None.
- *
- * SPECIAL CONSIDERATIONS:
- *  May be called recursively with limited recursion depth (see FOLDER_TRACK_DEPTH).
- *  Each recursion uses ~50 bytes of RAM.
- */
-void lsPrint(SdFile * theDir, char * cmdStr, byte flags, byte indent)
+void lsPrint(SdFile * theDir, const char * cmdStr, byte flags, byte indent)
 {
-  static byte depth = 0;      // current recursion depth
-  byte status;
-  uint16_t index;
-  SdFile subdir;
-
-  theDir->rewind();
-  while ((status = lsPrintNext(theDir, cmdStr, flags, indent)))
-  {
-    if ((status == WAS_SUBDIR) && (flags & LS_R) && (depth < FOLDER_TRACK_DEPTH))
-    {
-      // was a subdirectory, recursion allowed, recursion depth OK
-
-      index = (theDir->curPosition() / DIR_SIZE) - 1;  // determine current directory entry index
-      if (subdir.open(theDir, index, O_READ))
-      {
-        ++depth;        // limit recursion
-        lsPrint(&subdir, cmdStr, flags, indent + SUBDIR_INDENT); // recursively list subdirectory
-        --depth;
-        subdir.close();
+   static byte depth = 0;      // current recursion depth
+   theDir->rewind();
+   for(;;){
+      switch(lsPrintNext(theDir, cmdStr, flags, indent)){
+         case print_tree_status::eof:
+            return;
+         case print_tree_status::subdir:
+            if ((flags & LS_R) && (depth < max_folder_depth)){
+               uint16_t const index = (theDir->curPosition() / sizeof(dir_t) ) - 1;  // determine current directory entry index
+               SdFile subdir;
+               if (subdir.open(theDir, index, O_READ)){
+                  ++depth;        // limit recursion
+                  lsPrint(&subdir, cmdStr, flags, indent + subdir_indent); // recursively list subdirectory
+                  --depth;
+                  subdir.close();
+               }
+            }
+            break;
+         default:
+            break;
       }
-    }
-  }
+   }
 }
 
 /*
  * NAME:
- *  void lsPrintNext(SdFile * theDir, char * cmdStr, byte flags, byte indent)
- *
+
  * PARAMETERS:
  *  SdFile * theDir = the directory to list (assumed opened)
  *  char * cmdStr = the command line file/directory string (with possible wildcards)
@@ -2285,64 +1261,50 @@ void lsPrint(SdFile * theDir, char * cmdStr, byte flags, byte indent)
  * SPECIAL CONSIDERATIONS:
  *  None.
  */
-byte lsPrintNext(SdFile * theDir, char * cmdStr, byte flags, byte indent)
+byte lsPrintNext(SdFile * theDir, const char * cmdStr, byte flags, byte indent)
 {
   byte pos = 0;           // output position
   byte open_stat;         // file open status
   byte status;            // return status
   SdFile tempFile;
-  char fname[FILENAME_EXT_SIZE];
+  char fname[max_file_string_len];
 
   // Find next available object to display in the specified directory
-  while ((open_stat = tempFile.openNext(theDir, O_READ)))
-  {
-    if (tempFile.getFilename(fname)) // Get the filename of the object we're looking at
-    {
-      if (tempFile.isDir() || tempFile.isFile() || tempFile.isSubDir())
-      {
-        if (tempFile.isFile())        // wildcards only apply to files
-        {
-          if (wildcmp(cmdStr, fname)) // see if it matches the wildcard
-          {
-            status = WAS_FILE;
+  while ((open_stat = tempFile.openNext(theDir, O_READ))){
+    if (tempFile.getFilename(fname)) {
+      if (tempFile.isDir() || tempFile.isFile() || tempFile.isSubDir()){
+        if (tempFile.isFile()) {
+          if (wildcmp(cmdStr, fname)){
+            status = print_tree_status::file ;// WAS_FILE;
             break;      // is a matching file name, display it
           }
-          // else skip it
-        }
-        else    // is a subdirectory
-        {
-          status = WAS_SUBDIR;
+        }else {
+          status = print_tree_status::subdir;
           break;        // display subdirectory name
         }
       }
     }
     tempFile.close();
   }
-  if (!open_stat)
-  {
-    return WAS_EOF;     // nothing more in this (sub)directory
+  if (!open_stat) {
+    return print_tree_status::eof;     // nothing more in this (sub)directory
   }
 
   // output the file or directory name
-
-  // indent for dir level
-  for (byte i = 0; i < indent; i++)
-  {
+  // indented for dir level
+  for (byte i = 0; i < indent; i++){
     NewSerial.write(' ');
   }
 
   // print name
   pos += NewSerial.print(fname);
 
-  if (tempFile.isSubDir())
-  {
+  if (tempFile.isSubDir()){
     pos += NewSerial.write('/');    // subdirectory indicator
   }
   // print size if requested (files only)
-  if (tempFile.isFile() && (flags & LS_SIZE))
-  {
-    while (pos++ < LS_FIELD_SIZE)
-    {
+  if (tempFile.isFile() && (flags & LS_SIZE)){
+    while (pos++ < max_file_string_len +1){
       NewSerial.write(' ');
     }
     NewSerial.write(' ');           // ensure at least 1 separating space
@@ -2359,4 +1321,3 @@ void toggleLED(byte pinNumber)
   if(digitalRead(pinNumber)) digitalWrite(pinNumber, LOW);
   else digitalWrite(pinNumber, HIGH);
 }
-  
