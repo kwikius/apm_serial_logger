@@ -340,11 +340,14 @@ byte command_init()
 
    return 1;
 }
-uint8_t command_ls(char * command_arg)
+
+uint8_t command_ls()
 {
+   char * command_arg = nullptr;
    if (count_cmd_args() == 1)  {
      // Don't use the 'ls()' method in the SdFat library as it does not
      // limit recursion into subdirectories.
+     command_arg = get_cmd_arg(0); // reuse the command name
      command_arg[0] = '*';       // use global wildcard
      command_arg[1] = '\0';
    }else{
@@ -357,24 +360,94 @@ uint8_t command_ls(char * command_arg)
 
 byte command_md()
 {
-         //Argument 2: Directory name
-      char * command_arg = get_cmd_arg(1);
-      if(command_arg == 0){
-        return 0;
-      }
-      SdFile newDirectory;
-      if (!newDirectory.makeDir(&currentDirectory, command_arg)) {
-        if ((feedback_mode & setting::extended_info) > 0)
-        {
-          NewSerial.print(F("error creating directory: "));
-          NewSerial.println(command_arg);
-        }
-        return 0;
-      }
-      else
-      {
-        return 1;
-      }
+   //Argument 2: Directory name
+   char * command_arg = get_cmd_arg(1);
+   if(command_arg == 0){
+     return 0;
+   }
+   SdFile newDirectory;
+   if (!newDirectory.makeDir(&currentDirectory, command_arg)) {
+     if ((feedback_mode & setting::extended_info) > 0)
+     {
+       NewSerial.print(F("error creating directory: "));
+       NewSerial.println(command_arg);
+     }
+     return 0;
+   }
+   else
+   {
+     return 1;
+   }
+}
+
+byte command_rm()
+{
+   //Argument 2: Remove option or file name/subdirectory to remove
+   char* command_arg = get_cmd_arg(1);
+   if(command_arg == 0){
+     return 0;;
+   }
+
+   SdFile tempFile;
+   //Argument 2: Remove subfolder recursively?
+   if ((count_cmd_args() == 3) && (strcmp_P(command_arg, PSTR("-rf")) == 0)) {
+     //Remove the subfolder
+     if (tempFile.open(&currentDirectory, get_cmd_arg(2), O_READ))
+     {
+       byte tmp_var = tempFile.rmRfStar();
+       tempFile.close();
+       return tmp_var;
+     }else{
+      return 0;
+     }
+   }
+   
+   //Argument 2: Remove subfolder if empty or remove file
+   if (tempFile.open(&currentDirectory, command_arg, O_READ)){
+     byte tmp_var = 0;
+     if (tempFile.isDir() || tempFile.isSubDir()){
+       tmp_var = tempFile.rmDir();
+     }
+     else{
+       tempFile.close();
+       if (tempFile.open(&currentDirectory, command_arg, O_WRITE)){
+         tmp_var = tempFile.remove();
+       }
+     }
+     tempFile.close();
+     return tmp_var;
+   }
+
+   //Argument 2: File wildcard removal
+   //Fixed by dlkeng - Thank you!
+   uint32_t filesDeleted = 0;
+   char fname[13];
+   strupr(command_arg);
+   currentDirectory.rewind();
+   while (tempFile.openNext(&currentDirectory, O_READ)){ //Step through each object in the current directory
+     if (!tempFile.isDir() && !tempFile.isSubDir()) { // Remove only files 
+       if (tempFile.getFilename(fname)) { // Get the filename of the object we're looking at
+         if (wildcmp(command_arg, fname)) { // See if it matches the wildcard 
+           tempFile.close();
+           tempFile.open(&currentDirectory, fname, O_WRITE);  // Re-open for WRITE to be delete
+           if (tempFile.remove()) {// Remove this file
+             ++filesDeleted;
+           }
+         }
+       }
+     }
+     tempFile.close();
+   }
+
+   if ((feedback_mode & setting::extended_info) > 0) {
+     NewSerial.print(filesDeleted);
+     NewSerial.println(F(" file(s) deleted"));
+   }
+   if (filesDeleted > 0){
+     return 1;
+   }else{
+     return 0;
+   }
 }
 
 void command_shell(void)
@@ -414,31 +487,11 @@ void command_shell(void)
     }
 //---------------------------------------------------------------
     else if(strcmp_P(command_arg, PSTR("ls")) == 0){
-      command_succeeded = command_ls(command_arg);
+      command_succeeded = command_ls();
     }
 //--------------------------------------------------------------
     else if(strcmp_P(command_arg, PSTR("md")) == 0) {
-#if 0
-      //Argument 2: Directory name
-      command_arg = get_cmd_arg(1);
-      if(command_arg == 0)
-        continue;
-
-      SdFile newDirectory;
-      if (!newDirectory.makeDir(&currentDirectory, command_arg)) {
-        if ((feedback_mode & setting::extended_info) > 0)
-        {
-          NewSerial.print(F("error creating directory: "));
-          NewSerial.println(command_arg);
-        }
-      }
-      else
-      {
-        command_succeeded = 1;
-      }
-#else
       command_succeeded = command_md();
-#endif
     }
 //----------------------------------------------------------
     //NOTE on using "rm <option>/<file> <subfolder>"
@@ -446,79 +499,7 @@ void command_shell(void)
     // "rm <subfolder>" removes the <subfolder> only if its empty
     // "rm <filename>" removes the <filename>
     else if(strcmp_P(command_arg, PSTR("rm")) == 0) {
-      //Argument 2: Remove option or file name/subdirectory to remove
-      command_arg = get_cmd_arg(1);
-      if(command_arg == 0)
-        continue;
-
-      //Argument 2: Remove subfolder recursively?
-      if ((count_cmd_args() == 3) && (strcmp_P(command_arg, PSTR("-rf")) == 0))
-      {
-        //Remove the subfolder
-        if (tempFile.open(&currentDirectory, get_cmd_arg(2), O_READ))
-        {
-          tmp_var = tempFile.rmRfStar();
-          tempFile.close();
-          command_succeeded = tmp_var;
-        }
-        continue;
-      }
-
-      //Argument 2: Remove subfolder if empty or remove file
-      if (tempFile.open(&currentDirectory, command_arg, O_READ))
-      {
-        tmp_var = 0;
-        if (tempFile.isDir() || tempFile.isSubDir())
-          tmp_var = tempFile.rmDir();
-        else
-        {
-          tempFile.close();
-          if (tempFile.open(&currentDirectory, command_arg, O_WRITE))
-            tmp_var = tempFile.remove();
-        }
-        command_succeeded = tmp_var;
-        tempFile.close();
-        continue;
-      }
-
-      //Argument 2: File wildcard removal
-      //Fixed by dlkeng - Thank you!
-      uint32_t filesDeleted = 0;
-
-      char fname[13];
-
-      strupr(command_arg);
-
-      currentDirectory.rewind();
-      while (tempFile.openNext(&currentDirectory, O_READ)) //Step through each object in the current directory
-      {
-        if (!tempFile.isDir() && !tempFile.isSubDir()) // Remove only files
-        {
-          if (tempFile.getFilename(fname)) // Get the filename of the object we're looking at
-          {
-            if (wildcmp(command_arg, fname))  // See if it matches the wildcard
-            {
-              tempFile.close();
-              tempFile.open(&currentDirectory, fname, O_WRITE);  // Re-open for WRITE to be deleted
-
-              if (tempFile.remove()) // Remove this file
-              {
-                ++filesDeleted;
-              }
-            }
-          }
-        }
-        tempFile.close();
-      }
-
-      if ((feedback_mode & setting::extended_info) > 0)
-      {
-        NewSerial.print(filesDeleted);
-        NewSerial.println(F(" file(s) deleted"));
-      }
-      if (filesDeleted > 0){
-        command_succeeded = 1;
-      }
+      command_succeeded = command_rm();
     }
 //----------------------------------------------------------------------
     else if(strcmp_P(command_arg, PSTR("cd")) == 0){
@@ -648,14 +629,12 @@ void command_shell(void)
           }
         }
       }
-
       //read text from the shell and write it to the file
       byte dataLen;
       while(1) {
-//#ifdef INCLUDE_SIMPLE_EMBEDDED
-        if ((feedback_mode & setting::end_marker) > 0)
+        if ((feedback_mode & setting::end_marker) > 0){
           NewSerial.print((char)0x1A); // Ctrl+Z ends the data and marks the start of result
-//#endif
+        }
         NewSerial.print(F("<")); //give a different prompt
 
         //read one line of text
