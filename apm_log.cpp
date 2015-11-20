@@ -86,117 +86,13 @@ void setup_sd_and_fat()
   if (!currentDirectory.openRoot(&volume)) systemError(error_code::root_init);
 }
 
-void setup(void)
-{
-  pinMode(statled1.pin, OUTPUT);
-  //Power down various bits of hardware to lower power usage  
-  set_sleep_mode(SLEEP_MODE_IDLE);
-  sleep_enable();
-
-  //Shut off TWI, Timer2, Timer1, ADC
-  ADCSRA &= ~(1<<ADEN); //Disable ADC
-  ACSR = (1<<ACD); //Disable the analog comparator
-  DIDR0 = 0x3F; //Disable digital input buffers on all ADC0-ADC5 pins
-  DIDR1 = (1<<AIN1D)|(1<<AIN0D); //Disable digital input buffer on AIN1/0
-
-  power_twi_disable();
-  power_timer1_disable();
-  power_timer2_disable();
-  power_adc_disable();
-
-  NewSerial.begin(setting::baud_rate);
-
-  NewSerial.print(F("1"));
-
-  setup_sd_and_fat();
-
-  NewSerial.print(F("2"));
-
-#if RAM_TESTING == 1
-  printRam(); //Print the available RAM
-#endif
-  memset(folderTree, 0, sizeof(folderTree)); //Clear folder tree
-}
+#include "setup.cpp"
 
 void loop(void)
 {
   command_shell();
  // while(1); //We should never get this far
 }
-
-//Log to a new file everytime the system boots
-//Checks the spots in EEPROM for the next available LOG# file name
-//Updates EEPROM and then appends to the new log file.
-//Limited to 65535 files but this should not always be the case.
-#if 0
-namespace {
-   char new_file_name[13];
-}
-char* newlog(void)
-{
-  SdFile newFile; //This will contain the file for SD writing
-  uint16_t new_file_number = 
-      static_cast<uint16_t>(EEPROM.read(eeprom_loc::new_file_idx)) | 
-      (static_cast<uint16_t>(EEPROM.read(eeprom_loc::new_file_idx+1)) << 8);
-      
-  //If both EEPROM spots are 255 (0xFF), that means they are un-initialized (first time OpenLog has been turned on)
-  //Let's init them both to 0
-  if(new_file_number == 0xFFFF) {
-    new_file_number = 0; //By default, unit will start at file number zero
-    EEPROM.write(eeprom_loc::new_file_idx, 0x00);
-    EEPROM.write(eeprom_loc::new_file_idx+1, 0x00);
-  }
-
-  //The above code looks like it will forever loop if we ever create 65535 logs
-  //Let's quit if we ever get to 65534
-  //65534 logs is quite possible if you have a system with lots of power on/off cycles
-  if(new_file_number == 65534) {
-    //Gracefully drop out to command prompt with some error
-    NewSerial.print(F("!Too many logs:1!"));
-    return(0); //Bail!
-  }
-  //If we made it this far, everything looks good - let's start testing to see if our file number is the next available
-  //Search for next available log spot
-  while(1) {
-    sprintf_P(new_file_name, PSTR("LOG%05u.TXT"), new_file_number); //Splice the new file number into this file name
-    //Try to open file, if fail (file doesn't exist), then break
-    if (newFile.open(&currentDirectory, new_file_name, O_CREAT | O_EXCL | O_WRITE)) {
-      break;
-    }
-    //Try to open file and see if it is empty. If so, use it.
-    if (newFile.open(&currentDirectory, new_file_name, O_READ))  {
-      if (newFile.fileSize() == 0) {
-        newFile.close();        // Close this existing file we just opened.
-        return(new_file_name);  // Use existing empty file.
-      }
-      newFile.close(); // Close this existing file we just opened.
-    }
-    //Try the next number
-    new_file_number++;
-    if(new_file_number > 65533) //There is a max of 65534 logs
-    {
-      NewSerial.print(F("!Too many logs:2!"));
-      return(0); //Bail!
-    }
-  }
-  newFile.close(); //Close this new file we just opened
-  new_file_number++; //Increment so the next power up uses the next file #
-
-  //Record new_file number to EEPROM
-  byte lsb = (byte)(new_file_number & 0x00FF);
-  byte msb = (byte)((new_file_number & 0xFF00) >> 8);
-  EEPROM.write(eeprom_loc::new_file_idx, lsb); 
-  if (EEPROM.read(eeprom_loc::new_file_idx+1) != msb){
-    EEPROM.write(eeprom_loc::new_file_idx+1, msb); // MSB
-  }
-
-#if DEBUG
-  NewSerial.print(F("\nCreated new file: "));
-  NewSerial.println(new_file_name);
-#endif
-  return(new_file_name);
-}
-#endif
 
 void power_saving_mode()
 {
@@ -211,123 +107,7 @@ void power_saving_mode()
 
 }
 
-//This is the most important function of the device. These loops have been tweaked as much as possible.
-//Modifying this loop may negatively affect how well the device can record at high baud rates.
-//Appends a stream of serial data to a given file
-//Assumes the currentDirectory variable has been set before entering the routine
-//Does not exit until Ctrl+z (ASCII 26) is received
-//Returns 0 on error
-//Returns 1 on success
-byte append_file(const char* file_name)
-{
-  SdFile workingFile;
-  // O_CREAT - create the file if it does not exist
-  // O_APPEND - seek to the end of the file prior to each write
-  // O_WRITE - open for write
-  if (!workingFile.open(&currentDirectory, file_name, O_CREAT | O_APPEND | O_WRITE)) systemError(error_code::file_open);
-  if (workingFile.fileSize() == 0) {
-    //This is a trick to make sure first cluster is allocated - found in Bill's example/beta code
-    //workingFile.write((byte)0); //Leaves a NUL at the beginning of a file
-    workingFile.rewind();
-    workingFile.sync();
-  }  
-
-  NewSerial.print(F("<")); //give a different prompt to indicate no echoing
-  digitalWrite(statled1.pin, HIGH); //Turn on indicator LED
-
-  const byte LOCAL_BUFF_SIZE = 128; //This is the 2nd buffer. It pulls from the larger NewSerial buffer as quickly as possible.
-  byte localBuffer[LOCAL_BUFF_SIZE];
-  byte checkedSpot;
-  byte escape_chars_received = 0;
-
-  const uint16_t MAX_IDLE_TIME_MSEC = 500; //The number of milliseconds before unit goes to sleep
-  const uint16_t MAX_TIME_BEFORE_SYNC_MSEC = 5000;
-  uint32_t lastSyncTime = millis(); //Keeps track of the last time the file was synced
-#if RAM_TESTING == 1
-  printRam(); //Print the available RAM
-#endif
-  //Check if we should ignore escape characters
-  //If we are ignoring escape characters the recording loop is infinite and can be made shorter (less checking)
-  //This should allow for recording at higher incoming rates
-  if(setting::num_escapes == 0){
-    while(1){
-      byte charsToRecord = NewSerial.read(localBuffer, sizeof(localBuffer)); //Read characters from global buffer into the local buffer
-      if (charsToRecord > 0) {
-         workingFile.write(localBuffer, charsToRecord); //Record the buffer to the card
-         toggleLED(statled1.pin); //STAT1_PORT ^= (1<<STAT1); //Toggle the STAT1 LED each time we record the buffer
-         if((millis() - lastSyncTime) > MAX_TIME_BEFORE_SYNC_MSEC){ 
-          //This is here to make sure a log is recorded in the instance
-          //where the user is throwing non-stop data at the unit from power on to forever
-           workingFile.sync(); //Sync the card
-           lastSyncTime = millis();
-         }
-      }else if( (millis() - lastSyncTime) > MAX_IDLE_TIME_MSEC) { //If we haven't received any characters in 2s, goto sleep
-         workingFile.sync(); //Sync the card before we go to sleep
-         power_saving_mode();
-         escape_chars_received = 0; // Clear the esc flag as it has timed out
-         lastSyncTime = millis(); //Reset the last sync time to now
-      }
-    }
-  }
-  //We only get this far if escape characters are more than zero
-  //Start recording incoming characters
-  while(escape_chars_received < setting::num_escapes) {
-    byte charsToRecord = NewSerial.read(localBuffer, sizeof(localBuffer)); //Read characters from global buffer into the local buffer
-    if (charsToRecord > 0) {
-      if (localBuffer[0] == setting::escape_character)  {
-        escape_chars_received++;
-        //Scan the local buffer for escape characters
-        for(checkedSpot = 1 ; checkedSpot < charsToRecord ; checkedSpot++){
-          if(localBuffer[checkedSpot] == setting::escape_character) {
-            escape_chars_received++;
-            //If charsToRecord is greater than 3 there's a chance here where we receive three esc chars
-            // and then reset the variable: 26 26 26 A T + would not escape correctly
-            if(escape_chars_received == setting::num_escapes){
-              break;
-            }
-          }
-          else{
-            escape_chars_received = 0;
-          }
-        }
-      }else{
-        escape_chars_received = 0;
-      }
-      workingFile.write(localBuffer, charsToRecord); //Record the buffer to the card
-      toggleLED(statled1.pin); //STAT1_PORT ^= (1<<STAT1); //Toggle the STAT1 LED each time we record the buffer
-      if((millis() - lastSyncTime) > MAX_TIME_BEFORE_SYNC_MSEC){ 
-        //This is here to make sure a log is recorded in the instance
-        //where the user is throwing non-stop data at the unit from power on to forever
-        workingFile.sync(); //Sync the card
-        lastSyncTime = millis();
-      }
-    }
-    //No characters received?
-    else if( (millis() - lastSyncTime) > MAX_IDLE_TIME_MSEC) { //If we haven't received any characters in 2s, goto sleep
-      workingFile.sync(); //Sync the card before we go to sleep
-      power_saving_mode();
-      escape_chars_received = 0; // Clear the esc flag as it has timed out
-      lastSyncTime = millis(); //Reset the last sync time to now
-    }
-  }
-  workingFile.sync();
-  workingFile.close(); // Done recording, close out the file
-  digitalWrite(statled1.pin, port_pin::low); // Turn off indicator LED
-  NewSerial.print(F("~")); // Indicate a successful record
-  return(1); //Success!
-}
-
-void blink_error(byte ERROR_TYPE) {
-  while(1) {
-    for(int x = 0 ; x < ERROR_TYPE ; x++) {
-      digitalWrite(statled1.pin, port_pin::high);
-      delay(200);
-      digitalWrite(statled1.pin, port_pin::low);
-      delay(200);
-    }
-    delay(2000);
-  }
-}
+#include "append_file.cpp"
 
 byte command_init()
 {
@@ -379,76 +159,9 @@ byte command_md()
      return 1;
    }
 }
-
-byte command_rm()
-{
-   //Argument 2: Remove option or file name/subdirectory to remove
-   char* command_arg = get_cmd_arg(1);
-   if(command_arg == 0){
-     return 0;;
-   }
-
-   SdFile tempFile;
-   //Argument 2: Remove subfolder recursively?
-   if ((count_cmd_args() == 3) && (strcmp_P(command_arg, PSTR("-rf")) == 0)) {
-     //Remove the subfolder
-     if (tempFile.open(&currentDirectory, get_cmd_arg(2), O_READ))
-     {
-       byte tmp_var = tempFile.rmRfStar();
-       tempFile.close();
-       return tmp_var;
-     }else{
-      return 0;
-     }
-   }
-   
-   //Argument 2: Remove subfolder if empty or remove file
-   if (tempFile.open(&currentDirectory, command_arg, O_READ)){
-     byte tmp_var = 0;
-     if (tempFile.isDir() || tempFile.isSubDir()){
-       tmp_var = tempFile.rmDir();
-     }
-     else{
-       tempFile.close();
-       if (tempFile.open(&currentDirectory, command_arg, O_WRITE)){
-         tmp_var = tempFile.remove();
-       }
-     }
-     tempFile.close();
-     return tmp_var;
-   }
-
-   //Argument 2: File wildcard removal
-   //Fixed by dlkeng - Thank you!
-   uint32_t filesDeleted = 0;
-   char fname[13];
-   strupr(command_arg);
-   currentDirectory.rewind();
-   while (tempFile.openNext(&currentDirectory, O_READ)){ //Step through each object in the current directory
-     if (!tempFile.isDir() && !tempFile.isSubDir()) { // Remove only files 
-       if (tempFile.getFilename(fname)) { // Get the filename of the object we're looking at
-         if (wildcmp(command_arg, fname)) { // See if it matches the wildcard 
-           tempFile.close();
-           tempFile.open(&currentDirectory, fname, O_WRITE);  // Re-open for WRITE to be delete
-           if (tempFile.remove()) {// Remove this file
-             ++filesDeleted;
-           }
-         }
-       }
-     }
-     tempFile.close();
-   }
-
-   if ((feedback_mode & setting::extended_info) > 0) {
-     NewSerial.print(filesDeleted);
-     NewSerial.println(F(" file(s) deleted"));
-   }
-   if (filesDeleted > 0){
-     return 1;
-   }else{
-     return 0;
-   }
-}
+#include "command_rm.cpp"
+#include "command_read.cpp"
+#include "command_write.cpp"
 
 void command_shell(void)
 {
@@ -514,92 +227,11 @@ void command_shell(void)
     }
 //---------------------------------------------------------
     else if(strcmp_P(command_arg, PSTR("read")) == 0) {
-      //Argument 2: File name
-      command_arg = get_cmd_arg(1);
-      if(command_arg == 0)
-        continue;
-
-      //search file in current directory and open it
-      if (!tempFile.open(&currentDirectory, command_arg, O_READ)) {
-        if ((feedback_mode & setting::extended_info) > 0)
-        {
-          NewSerial.print(F("Failed to open file "));
-          NewSerial.println(command_arg);
-        }
-        continue;
-      }
-
-      //Argument 3: File seek position
-      if ((command_arg = get_cmd_arg(2)) != 0) {
-        if ( is_number(command_arg, strlen(command_arg))) {
-          int32_t offset = strtolong(command_arg);
-          if(!tempFile.seekSet(offset)) {
-            if ((feedback_mode & setting::extended_info) > 0)
-            {
-              NewSerial.print(F("Error seeking to "));
-              NewSerial.println(command_arg);
-            }
-            tempFile.close();
-            continue;
-          }
-        }
-      }
-
-      //Argument 4: How much data (number of characters) to read from file
-      uint32_t readAmount = (uint32_t)-1;
-      if ((command_arg = get_cmd_arg(3)) != 0){
-        if (is_number(command_arg, strlen(command_arg))){
-          readAmount = strtolong(command_arg);
-         }
-      }
-
-      //Argument 5: Should we print ASCII or HEX? 1 = ASCII, 2 = HEX, 3 = RAW
-      uint32_t printType = 1; //Default to ASCII
-      if ((command_arg = get_cmd_arg(4)) != 0){
-        if (is_number(command_arg, strlen(command_arg))){
-          printType = strtolong(command_arg);
-        }
-      }
-
-      //Print file contents from current seek position to the end (readAmount)
-      uint32_t readSpot = 0;
-    //  while ( (int16_t v = tempFile.read()) >= 0) {
-        for(;;){
-         int16_t v = tempFile.read();
-         if ( v >= 0){
-           //file.read() returns a 16 bit character. We want to be able to print extended ASCII
-           //So we need 8 bit unsigned.
-           byte c = v; //Force the 16bit signed variable into an 8bit unsigned
-
-           if(++readSpot > readAmount) break;
-           if(printType == 1) { //Printing ASCII
-             //Test character to see if it is visible, if not print '.'
-             if(c >= ' ' && c < 127)
-               NewSerial.write(c); //Regular ASCII
-             else if (c == '\n' || c == '\r')
-               NewSerial.write(c); //Go ahead and print the carriage returns and new lines
-             else
-               NewSerial.write(F(".")); //For non visible ASCII characters, print a .
-           }
-           else if (printType == 2) {
-             NewSerial.print(c, HEX); //Print in HEX
-             NewSerial.print(F(" "));
-           }
-           else if (printType == 3) {
-             NewSerial.write(c); //Print raw
-           }
-         }else{
-            break;
-         }
-      }
-      tempFile.close();
-      command_succeeded = 1;
-      if ((feedback_mode & setting::end_marker) == 0){
-        NewSerial.println();
-      }
+      command_succeeded = command_read();
     }
 //--------------------------------------------------------------------
     else if(strcmp_P(command_arg, PSTR("write")) == 0){
+#if 0
       //Argument 2: File name
       command_arg = get_cmd_arg(1);
       if(command_arg == 0)
@@ -668,6 +300,9 @@ void command_shell(void)
       }
 
       tempFile.close();
+#else
+      command_succeeded = command_write(buffer, sizeof(buffer));
+#endif
     }
 //-------------------------------------------------------
     else if(strcmp_P(command_arg, PSTR("size")) == 0) {
@@ -877,6 +512,7 @@ byte read_line(char* buffer, byte buffer_length)
       break;
     }
     else if (c == '\n') {
+      NewSerial.print("Newline\n");
       //Do nothing - ignore newlines
       //This was added to v2.51 to make command line control easier from a micro
       //You never know what fprintf or sprintf is going to throw at the buffer
@@ -1136,85 +772,19 @@ byte wildcmp(const char* wild, const char* string)
   return !(*wild);
 }
 
-struct print_tree_status{
-   static constexpr byte eof = 0;
-   static constexpr byte file = 1;
-   static constexpr byte subdir = 2;
-};
 
-void lsPrint(SdFile * theDir, const char * cmdStr, byte flags, byte indent)
+
+#include "lsprint.cpp"
+
+void blink_error(byte ERROR_TYPE) 
 {
-   static byte depth = 0;      // current recursion depth
-   theDir->rewind();
-   for(;;){
-      switch(lsPrintNext(theDir, cmdStr, flags, indent)){
-         case print_tree_status::eof:
-            return;
-         case print_tree_status::subdir:
-            if ((flags & LS_R) && (depth < setting::max_folder_depth)){
-               uint16_t const index = (theDir->curPosition() / sizeof(dir_t) ) - 1;  // determine current directory entry index
-               SdFile subdir;
-               if (subdir.open(theDir, index, O_READ)){
-                  ++depth;        // limit recursion
-                  lsPrint(&subdir, cmdStr, flags, indent + setting::subdir_indent); // recursively list subdirectory
-                  --depth;
-                  subdir.close();
-               }
-            }
-            break;
-         default:
-            break;
-      }
-   }
-}
-
-byte lsPrintNext(SdFile * theDir, const char * cmdStr, byte flags, byte indent)
-{
-  byte pos = 0;           // output position
-  byte open_stat;         // file open status
-  byte status;            // return status
-  SdFile tempFile;
-  char fname[setting::max_file_string_len];
-
-  // Find next available object to display in the specified directory
-  while ((open_stat = tempFile.openNext(theDir, O_READ))){
-    if (tempFile.getFilename(fname)) {
-      if (tempFile.isDir() || tempFile.isFile() || tempFile.isSubDir()){
-        if (tempFile.isFile()) {
-          if (wildcmp(cmdStr, fname)){
-            status = print_tree_status::file ;// WAS_FILE;
-            break;      // is a matching file name, display it
-          }
-        }else {
-          status = print_tree_status::subdir;
-          break;        // display subdirectory name
-        }
-      }
+  while(1) {
+    for(int x = 0 ; x < ERROR_TYPE ; x++) {
+      digitalWrite(statled1.pin, port_pin::high);
+      delay(200);
+      digitalWrite(statled1.pin, port_pin::low);
+      delay(200);
     }
-    tempFile.close();
+    delay(2000);
   }
-  if (!open_stat) {
-    return print_tree_status::eof;     // nothing more in this (sub)directory
-  }
-
-  // output the file or directory name indented for dir level
-  for (byte i = 0; i < indent; i++){
-    NewSerial.write(' ');
-  }
-  // print name
-  pos += NewSerial.print(fname);
-  if (tempFile.isSubDir()){
-    pos += NewSerial.write('/');    // subdirectory indicator
-  }
-  // print size if requested (files only)
-  if (tempFile.isFile() && (flags & LS_SIZE)){
-    while (pos++ < setting::max_file_string_len +1){
-      NewSerial.write(' ');
-    }
-    NewSerial.write(' ');           // ensure at least 1 separating space
-    NewSerial.print(tempFile.fileSize());
-  }
-  NewSerial.writeln();
-  tempFile.close();
-  return status;
 }
