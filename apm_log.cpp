@@ -9,131 +9,86 @@
 All we ask is that you include attribution of 'Based on OpenLog by SparkFun'.
  
  */
-
-#include <SdFat.h> //We do not use the built-in SD.h file because it calls Serial.print
-#include <SerialPort.h> //This is a new/beta library written by Bill Greiman. You rock Bill!
-#include <EEPROM.h>
-
 #include <avr/sleep.h> //Needed for sleep_mode
 #include <avr/power.h> //Needed for powering down perihperals such as the ADC/TWI and Timers
+#include <EEPROM.h>
 #include "log.h"
+#include "serial_port.h"
+#include "error_code.hpp"
 
+#define DEBUG  0
+//#define RAM_TESTING  1 //On
+#define RAM_TESTING  0 //Off
+// In order for compiler to optimise calls and save rom 
+// these are included inline rather than linked
+#include "system_error.cpp"
+#include "serial_port.cpp"
+#include "free_ram.cpp"
 namespace {
-   SerialPort<0, 250, 0> NewSerial;
-   #define DEBUG  0
-
-   //#define RAM_TESTING  1 //On
-   #define RAM_TESTING  0 //Off
-
+   
    //#define Reset_AVR() wdt_enable(WDTO_1S); while(1) {} //Correct way of resetting the ATmega, but doesn't work with 
    //Arduino pre-Optiboot bootloader
    void(* Reset_AVR) (void) = 0; //Dirty way of resetting the ATmega, but it works for now
 
-   static constexpr uint8_t max_commandline_args = 5;
-   static constexpr uint8_t max_folder_depth = 2;
-   static char folderTree[max_folder_depth][12];
-   static constexpr uint16_t max_file_string_len = 13;    
-   static constexpr char config_file_name[] = "config.txt";//This is the name of the file that contains the unit settings
-   static constexpr uint8_t subdir_indent = 2;
-   //Internal EEPROM locations for the user settings
+   struct setting{
+      static constexpr long      baud_rate = 9600; //This is the baud rate that the system runs at, default is 9600. Can be 1,200 to 1,000,000
+      static constexpr byte      escape_character = 0x1A; //This is the ASCII character we look for to break logging, default is ctrl+z
+      static constexpr byte      num_escapes = 3; //Number of escape chars before break logging, default is 3
+      static constexpr uint8_t   max_commandline_args = 5;
+      static constexpr uint8_t   max_folder_depth = 2;
+      static constexpr uint16_t  max_file_string_len = 13;    
+      static constexpr uint8_t   subdir_indent = 2;
+      static constexpr uint8_t   echo = 0x01;
+      static constexpr uint8_t   extended_info = 0x02;
+      static constexpr uint8_t   end_marker = 0x08;
+   };
+
+   //Internal EEPROM locations
    struct eeprom_loc{
      static constexpr uint16_t new_file_idx = 0x03; // 2 bytes
    };
 
    struct port_pin{
-
      static constexpr uint8_t low = LOW;
      static constexpr uint8_t high = HIGH;
      typedef decltype (_SFR_IO8(0)) port_type;
      port_pin(port_type port_in, uint8_t pin_in): port{port_in}, pin{pin_in}{}
      port_type port;
-     const uint8_t pin;
+     const uint8_t pin; // think this is the arduino pin number
    };
 
-   struct error_code{
-      static constexpr byte sd_init = 3;
-      static constexpr byte card_init = 6;
-      static constexpr byte volume_init = 7;
-      static constexpr byte root_init = 8;
-      static constexpr byte file_open = 9;
-   };
-
-   static port_pin statled1{PORTD,5};
-   static port_pin statled2{PORTB,13};
-
-   //These are bit locations used when testing for simple embedded commands.
-   struct feedback_bits{
-      static constexpr uint8_t echo = 0x01;
-      static constexpr uint8_t extended_info = 0x02;
-      static constexpr uint8_t end_marker = 0x08;
-   };
+   port_pin statled1{PORTD,5};
+   port_pin statled2{PORTB,13};
 
    Sd2Card card;
    SdVolume volume;
    SdFile currentDirectory;
 
-   long const setting_uart_speed = 9600; //This is the baud rate that the system runs at, default is 9600. Can be 1,200 to 1,000,000
-   byte const setting_escape_character = 0x1A; //This is the ASCII character we look for to break logging, default is ctrl+z
-   byte const setting_max_escape_character = 3; //Number of escape chars before break logging, default is 3
-   byte const setting_verbose = 1; //This controls the whether we get extended or simple responses.
-   byte const setting_echo = 0; //This turns on/off echoing at the command prompt
-   byte const setting_ignore_RX = 0; //This flag, when set to 1 will make OpenLog ignore the state of the RX pin when powering up
+   static char folderTree[setting::max_folder_depth][12];
 
    //Used for wild card delete and search
-   struct command_arg
+   struct command_arg_t
    {
      const char* arg; //Points to first character in command line argument
      byte arg_length; //Length of command line argument
    };
 
-   static struct command_arg cmd_arg[max_commandline_args];
-   constexpr byte feedback_mode = (feedback_bits::echo | feedback_bits::extended_info);
-
-}
-//Passes back the available amount of free RAM
-int freeRam () 
-{
-  extern int __heap_start, *__brkval; 
-  int v; 
-  return (int) &v - (__brkval == 0 ? (int) &__heap_start : (int) __brkval); 
+   command_arg_t cmd_arg[setting::max_commandline_args];
+   constexpr byte feedback_mode = (setting::echo | setting::extended_info);
 }
 
-void printRam() 
+void setup_sd_and_fat()
 {
-  NewSerial.print(F(" RAM:"));
-  NewSerial.println(freeRam());
-}
-
-//Handle errors by printing the error type and blinking LEDs in certain way
-//The function will never exit - it loops forever inside blink_error
-void systemError(byte error_type)
-{
-  NewSerial.print(F("Error "));
-  switch(error_type)
-  {
-  case error_code::sd_init:
-    NewSerial.print(F("sd")); 
-    break;
-  case error_code::card_init:
-   NewSerial.print(F("card")); 
-    break;
-  case error_code::volume_init:
-    NewSerial.print(F("volume")); 
-    break;
-  case error_code::root_init:
-    NewSerial.print(F("root")); 
-    break;
-  case error_code::file_open:
-    NewSerial.print(F("file")); 
-    break;
-  }
-  blink_error(error_type);
+  //Setup SD & FAT
+  if (!card.init(SPI_FULL_SPEED)) systemError(error_code::card_init);
+  if (!volume.init(&card)) systemError(error_code::volume_init);
+  currentDirectory.close(); //We close the cD before opening root. This comes from QuickStart example. Saves 4 bytes.
+  if (!currentDirectory.openRoot(&volume)) systemError(error_code::root_init);
 }
 
 void setup(void)
 {
   pinMode(statled1.pin, OUTPUT);
-
   //Power down various bits of hardware to lower power usage  
   set_sleep_mode(SLEEP_MODE_IDLE);
   sleep_enable();
@@ -149,15 +104,11 @@ void setup(void)
   power_timer2_disable();
   power_adc_disable();
 
-  NewSerial.begin(setting_uart_speed);
+  NewSerial.begin(setting::baud_rate);
 
   NewSerial.print(F("1"));
 
-  //Setup SD & FAT
-  if (!card.init(SPI_FULL_SPEED)) systemError(error_code::card_init);
-  if (!volume.init(&card)) systemError(error_code::volume_init);
-  currentDirectory.close(); //We close the cD before opening root. This comes from QuickStart example. Saves 4 bytes.
-  if (!currentDirectory.openRoot(&volume)) systemError(error_code::root_init);
+  setup_sd_and_fat();
 
   NewSerial.print(F("2"));
 
@@ -170,7 +121,7 @@ void setup(void)
 void loop(void)
 {
   command_shell();
-  while(1); //We should never get this far
+ // while(1); //We should never get this far
 }
 
 //Log to a new file everytime the system boots
@@ -247,28 +198,6 @@ char* newlog(void)
 }
 #endif
 
-#if 0
-//Log to the same file every time the system boots, sequentially
-//Checks to see if the file SEQLOG.txt is available
-//If not, create it
-//If yes, append to it
-//Return 0 on error
-//Return anything else on sucess
-void seqlog(void)
-{
-  SdFile seqFile;
-  const char sequentialFileName[] = "SEQLOG00.TXT";
-  //Try to create sequential file
-  if (!seqFile.open(&currentDirectory, sequentialFileName, O_CREAT | O_WRITE))
-  {
-    NewSerial.print(F("Error creating SEQLOG\n"));
-    return;
-  }
-  seqFile.close(); //Close this new file we just opened
-  append_file(sequentialFileName); 
-}
-#endif
-
 void power_saving_mode()
 {
    digitalWrite(statled1.pin, port_pin::low);
@@ -320,7 +249,7 @@ byte append_file(const char* file_name)
   //Check if we should ignore escape characters
   //If we are ignoring escape characters the recording loop is infinite and can be made shorter (less checking)
   //This should allow for recording at higher incoming rates
-  if(setting_max_escape_character == 0){
+  if(setting::num_escapes == 0){
     while(1){
       byte charsToRecord = NewSerial.read(localBuffer, sizeof(localBuffer)); //Read characters from global buffer into the local buffer
       if (charsToRecord > 0) {
@@ -342,18 +271,18 @@ byte append_file(const char* file_name)
   }
   //We only get this far if escape characters are more than zero
   //Start recording incoming characters
-  while(escape_chars_received < setting_max_escape_character) {
+  while(escape_chars_received < setting::num_escapes) {
     byte charsToRecord = NewSerial.read(localBuffer, sizeof(localBuffer)); //Read characters from global buffer into the local buffer
     if (charsToRecord > 0) {
-      if (localBuffer[0] == setting_escape_character)  {
+      if (localBuffer[0] == setting::escape_character)  {
         escape_chars_received++;
         //Scan the local buffer for escape characters
         for(checkedSpot = 1 ; checkedSpot < charsToRecord ; checkedSpot++){
-          if(localBuffer[checkedSpot] == setting_escape_character) {
+          if(localBuffer[checkedSpot] == setting::escape_character) {
             escape_chars_received++;
             //If charsToRecord is greater than 3 there's a chance here where we receive three esc chars
             // and then reset the variable: 26 26 26 A T + would not escape correctly
-            if(escape_chars_received == setting_max_escape_character){
+            if(escape_chars_received == setting::num_escapes){
               break;
             }
           }
@@ -400,6 +329,54 @@ void blink_error(byte ERROR_TYPE) {
   }
 }
 
+byte command_init()
+{
+   currentDirectory.close();
+   //Open the root directory
+   if (!currentDirectory.openRoot(&volume)) {
+      systemError(error_code::root_init);
+   }
+   memset(folderTree, 0, sizeof(folderTree)); //Clear folder tree
+
+   return 1;
+}
+uint8_t command_ls(char * command_arg)
+{
+   if (count_cmd_args() == 1)  {
+     // Don't use the 'ls()' method in the SdFat library as it does not
+     // limit recursion into subdirectories.
+     command_arg[0] = '*';       // use global wildcard
+     command_arg[1] = '\0';
+   }else{
+     command_arg = get_cmd_arg(1);
+     strupr(command_arg);
+   }
+   lsPrint(&currentDirectory, command_arg, LS_SIZE | LS_R, 0);
+   return 1;
+}
+
+byte command_md()
+{
+         //Argument 2: Directory name
+      char * command_arg = get_cmd_arg(1);
+      if(command_arg == 0){
+        return 0;
+      }
+      SdFile newDirectory;
+      if (!newDirectory.makeDir(&currentDirectory, command_arg)) {
+        if ((feedback_mode & setting::extended_info) > 0)
+        {
+          NewSerial.print(F("error creating directory: "));
+          NewSerial.println(command_arg);
+        }
+        return 0;
+      }
+      else
+      {
+        return 1;
+      }
+}
+
 void command_shell(void)
 {
   //Provide a simple shell
@@ -411,7 +388,7 @@ void command_shell(void)
   printRam(); //Print the available RAM
 #endif
   while(true){
-    if ((feedback_mode & feedback_bits::end_marker) > 0){
+    if ((feedback_mode & setting::end_marker) > 0){
       NewSerial.print(F("\0x1A")); // Ctrl+Z ends the data and marks the start of result
     }
     if (command_succeeded == 0){
@@ -426,49 +403,22 @@ void command_shell(void)
     command_succeeded = 0;
     //Argument 1: The actual command
     char* command_arg = get_cmd_arg(0);
+//-------------------------------------------------
     //Execute command
     if(strcmp_P(command_arg, PSTR("init")) == 0){
-      if ((feedback_mode & feedback_bits::extended_info) > 0)
-        NewSerial.println(F("Closing down file system"));
-      //Close file system
-      currentDirectory.close();
-      //Open the root directory
-      if (!currentDirectory.openRoot(&volume)) {
-         systemError(error_code::root_init);
-      }
-      memset(folderTree, 0, sizeof(folderTree)); //Clear folder tree
-      if ((feedback_mode & feedback_bits::extended_info) > 0){
-        NewSerial.println(F("File system initialized"));
-      }
-      command_succeeded = 1;
+      command_succeeded = command_init();
     }
 //---------------------------------------------------------------
     else if(strcmp_P(command_arg, PSTR("help")) == 0) {
-      print_menu();
-      command_succeeded = 1;
+      command_succeeded = print_menu();
     }
 //---------------------------------------------------------------
     else if(strcmp_P(command_arg, PSTR("ls")) == 0){
-      if ((feedback_mode & feedback_bits::extended_info) > 0) {
-        NewSerial.print(F("Volume is FAT"));
-        NewSerial.println(volume.fatType(), DEC);
-      }
-
-      if (count_cmd_args() == 1)  {
-        // Don't use the 'ls()' method in the SdFat library as it does not
-        // limit recursion into subdirectories.
-        command_arg[0] = '*';       // use global wildcard
-        command_arg[1] = '\0';
-      }else{
-        command_arg = get_cmd_arg(1);
-        strupr(command_arg);
-      }
-      // display listing with limited recursion into subdirectories
-      lsPrint(&currentDirectory, command_arg, LS_SIZE | LS_R, 0);
-      command_succeeded = 1;
+      command_succeeded = command_ls(command_arg);
     }
 //--------------------------------------------------------------
     else if(strcmp_P(command_arg, PSTR("md")) == 0) {
+#if 0
       //Argument 2: Directory name
       command_arg = get_cmd_arg(1);
       if(command_arg == 0)
@@ -476,7 +426,7 @@ void command_shell(void)
 
       SdFile newDirectory;
       if (!newDirectory.makeDir(&currentDirectory, command_arg)) {
-        if ((feedback_mode & feedback_bits::extended_info) > 0)
+        if ((feedback_mode & setting::extended_info) > 0)
         {
           NewSerial.print(F("error creating directory: "));
           NewSerial.println(command_arg);
@@ -486,6 +436,9 @@ void command_shell(void)
       {
         command_succeeded = 1;
       }
+#else
+      command_succeeded = command_md();
+#endif
     }
 //----------------------------------------------------------
     //NOTE on using "rm <option>/<file> <subfolder>"
@@ -558,7 +511,7 @@ void command_shell(void)
         tempFile.close();
       }
 
-      if ((feedback_mode & feedback_bits::extended_info) > 0)
+      if ((feedback_mode & setting::extended_info) > 0)
       {
         NewSerial.print(filesDeleted);
         NewSerial.println(F(" file(s) deleted"));
@@ -587,7 +540,7 @@ void command_shell(void)
 
       //search file in current directory and open it
       if (!tempFile.open(&currentDirectory, command_arg, O_READ)) {
-        if ((feedback_mode & feedback_bits::extended_info) > 0)
+        if ((feedback_mode & setting::extended_info) > 0)
         {
           NewSerial.print(F("Failed to open file "));
           NewSerial.println(command_arg);
@@ -600,7 +553,7 @@ void command_shell(void)
         if ( is_number(command_arg, strlen(command_arg))) {
           int32_t offset = strtolong(command_arg);
           if(!tempFile.seekSet(offset)) {
-            if ((feedback_mode & feedback_bits::extended_info) > 0)
+            if ((feedback_mode & setting::extended_info) > 0)
             {
               NewSerial.print(F("Error seeking to "));
               NewSerial.println(command_arg);
@@ -660,7 +613,7 @@ void command_shell(void)
       }
       tempFile.close();
       command_succeeded = 1;
-      if ((feedback_mode & feedback_bits::end_marker) == 0){
+      if ((feedback_mode & setting::end_marker) == 0){
         NewSerial.println();
       }
     }
@@ -673,7 +626,7 @@ void command_shell(void)
 
       //search file in current directory and open it
       if (!tempFile.open(&currentDirectory, command_arg, O_WRITE)) {
-        if ((feedback_mode & feedback_bits::extended_info) > 0) {
+        if ((feedback_mode & setting::extended_info) > 0) {
           NewSerial.print(F("Failed to open file "));
           NewSerial.println(command_arg);
         }
@@ -685,7 +638,7 @@ void command_shell(void)
         if (is_number(command_arg, strlen(command_arg))) {
           int32_t offset = strtolong(command_arg);
           if(!tempFile.seekSet(offset)) {
-            if ((feedback_mode & feedback_bits::extended_info) > 0)
+            if ((feedback_mode & setting::extended_info) > 0)
             {
               NewSerial.print(F("Error seeking to "));
               NewSerial.println(command_arg);
@@ -700,7 +653,7 @@ void command_shell(void)
       byte dataLen;
       while(1) {
 //#ifdef INCLUDE_SIMPLE_EMBEDDED
-        if ((feedback_mode & feedback_bits::end_marker) > 0)
+        if ((feedback_mode & setting::end_marker) > 0)
           NewSerial.print((char)0x1A); // Ctrl+Z ends the data and marks the start of result
 //#endif
         NewSerial.print(F("<")); //give a different prompt
@@ -717,7 +670,7 @@ void command_shell(void)
         //If we see the escape character at the end of the buffer then record up to
         //that point in the buffer excluding the escape char
         //See issue 168: https://github.com/sparkfun/OpenLog/issues/168
-        /*if(buffer[dataLen] == setting_escape_character)
+        /*if(buffer[dataLen] == setting::escape_character)
         {
           //dataLen -= 1; //Adjust dataLen to remove the escape char
           tempFile.write((byte*) buffer, dataLen); //write text to file
@@ -726,7 +679,7 @@ void command_shell(void)
 
         //write text to file
         if(tempFile.write((byte*) buffer, dataLen) != dataLen) {
-          if ((feedback_mode & feedback_bits::extended_info) > 0)
+          if ((feedback_mode & setting::extended_info) > 0)
             NewSerial.print(F("error writing to file\n\r"));
           break;
         }
@@ -754,11 +707,11 @@ void command_shell(void)
       }
       else
       {
-        if ((feedback_mode & feedback_bits::extended_info) > 0)
+        if ((feedback_mode & setting::extended_info) > 0)
           NewSerial.print(F("-1")); //Indicate no file is found
       }
 //#ifdef INCLUDE_SIMPLE_EMBEDDED
-      if ((feedback_mode & feedback_bits::end_marker) == 0)
+      if ((feedback_mode & setting::end_marker) == 0)
 //#endif
         NewSerial.println();
     }
@@ -839,13 +792,13 @@ void command_shell(void)
       command_succeeded = 1;
 //#endif
     }
-//----------------------------------------------------
+//--------------------------RESET--------------------------
     //Reset the AVR
     else if(strcmp_P(command_arg, PSTR("reset")) == 0)
     {
       Reset_AVR();
     }
-//-------------------------------------------------------
+//--------------------------NEW -----------------------------
     //Create new file
     else if(strcmp_P(command_arg, PSTR("new")) == 0) {
       //Argument 2: File name
@@ -862,13 +815,13 @@ void command_shell(void)
       }
       else
       {
-        if ((feedback_mode & feedback_bits::extended_info) > 0) {
+        if ((feedback_mode & setting::extended_info) > 0) {
           NewSerial.print(F("Error creating file: "));
           NewSerial.println(command_arg);
         }
       }
     }
-//-------------------------------------------------------------
+//-------------------------APPEND ------------------------------------
     //Append to a current file
     else if(strcmp_P(command_arg, PSTR("append")) == 0){
       //Argument 2: File name
@@ -896,7 +849,7 @@ void command_shell(void)
 //---------------------------------------------------------
     else
     {
-      if ((feedback_mode & feedback_bits::extended_info) > 0) {
+      if ((feedback_mode & setting::extended_info) > 0) {
         NewSerial.print(F("unknown command: "));
         NewSerial.println(command_arg);
       }
@@ -935,7 +888,7 @@ byte read_line(char* buffer, byte buffer_length)
     }
 
     // Only echo back if this is enabled
-    if ((feedback_mode & feedback_bits::echo)){
+    if ((feedback_mode & setting::echo)){
       NewSerial.print((char)c);
     }
 
@@ -950,7 +903,7 @@ byte read_line(char* buffer, byte buffer_length)
       //You never know what fprintf or sprintf is going to throw at the buffer
       //See issue 66: https://github.com/nseidle/OpenLog/issues/66
     }
-    /*else if (c == setting_escape_character) {
+    /*else if (c == setting::escape_character) {
       NewSerial.println();
       buffer[read_length] = c;
       buffer[read_length + 1] = '\0';
@@ -977,11 +930,11 @@ byte read_line(char* buffer, byte buffer_length)
 int8_t getNextFolderTreeIndex()
 {
   int8_t i;
-  for (i = 0; i < max_folder_depth; i++)
+  for (i = 0; i < setting::max_folder_depth; i++)
     if (strlen(folderTree[i]) == 0)
       return i;
 
-  if (i >= max_folder_depth)
+  if (i >= setting::max_folder_depth)
     i = -1;
 
   return i;
@@ -994,7 +947,7 @@ byte gotoDir(const char *dir)
 
   //Goto parent directory
   //@NOTE: This is a fix to make this work. Should be replaced with
-  //proper handling. Limitation: max_folder_depth subfolders
+  //proper handling. Limitation: setting::max_folder_depth subfolders
   //ERROR  if (strcmp_P(dir, F("..")) == 0) {
   if (strcmp_P(dir, PSTR("..")) == 0) {
     tmp_var = 1;
@@ -1015,7 +968,7 @@ byte gotoDir(const char *dir)
       }
       memset(folderTree[index], 0, 11);
     }
-    if (((feedback_mode & feedback_bits::extended_info) > 0) && (tmp_var == 0))
+    if (((feedback_mode & setting::extended_info) > 0) && (tmp_var == 0))
     {
       NewSerial.print(F("cannot cd to parent directory: "));
       NewSerial.println(dir);
@@ -1024,7 +977,7 @@ byte gotoDir(const char *dir)
   else
   {
     if (!(tmp_var = subDirectory.open(&currentDirectory, dir, O_READ))) {
-      if ((feedback_mode & feedback_bits::extended_info) > 0)
+      if ((feedback_mode & setting::extended_info) > 0)
       {
         NewSerial.print(F("directory not found: "));
         NewSerial.println(dir);
@@ -1041,7 +994,7 @@ byte gotoDir(const char *dir)
   return tmp_var;
 }
 
-void print_menu(void)
+byte print_menu(void)
 {
   NewSerial.println(F("OpenLog v3.3"));
   NewSerial.println(F("Basic commands:"));
@@ -1057,6 +1010,7 @@ void print_menu(void)
   NewSerial.println(F("size <file>\t\t: show size of <file>"));
   NewSerial.println(F("disk\t\t\t: Shows card info"));
   NewSerial.println(F("reset\t\t\t: reset"));
+  return 1;
 }
 
 //A rudimentary way to convert a string to a long 32 bit integer
@@ -1075,7 +1029,7 @@ byte count_cmd_args(void)
 {
   byte count = 0;
  
-  for( byte i = 0; i < max_commandline_args; i++)
+  for( byte i = 0; i < setting::max_commandline_args; i++)
     if((cmd_arg[i].arg != 0) && (cmd_arg[i].arg_length > 0))
       count++;
 
@@ -1088,7 +1042,7 @@ char general_buffer[30]; //Needed for command shell
 char* get_cmd_arg(byte index)
 {
   memset(general_buffer, 0, sizeof(general_buffer));
-  if (index < max_commandline_args)
+  if (index < setting::max_commandline_args)
     if ((cmd_arg[index].arg != 0) && (cmd_arg[index].arg_length > 0))
       return strncpy(general_buffer, cmd_arg[index].arg, MIN(sizeof(general_buffer), cmd_arg[index].arg_length));
 
@@ -1099,7 +1053,7 @@ char* get_cmd_arg(byte index)
 void add_cmd_arg(const char* buffer, byte buffer_length)
 {
   byte count = count_cmd_args();
-  if (count < max_commandline_args)
+  if (count < setting::max_commandline_args)
   {
     cmd_arg[count].arg = buffer;
     cmd_arg[count].arg_length = buffer_length;
@@ -1218,12 +1172,12 @@ void lsPrint(SdFile * theDir, const char * cmdStr, byte flags, byte indent)
          case print_tree_status::eof:
             return;
          case print_tree_status::subdir:
-            if ((flags & LS_R) && (depth < max_folder_depth)){
+            if ((flags & LS_R) && (depth < setting::max_folder_depth)){
                uint16_t const index = (theDir->curPosition() / sizeof(dir_t) ) - 1;  // determine current directory entry index
                SdFile subdir;
                if (subdir.open(theDir, index, O_READ)){
                   ++depth;        // limit recursion
-                  lsPrint(&subdir, cmdStr, flags, indent + subdir_indent); // recursively list subdirectory
+                  lsPrint(&subdir, cmdStr, flags, indent + setting::subdir_indent); // recursively list subdirectory
                   --depth;
                   subdir.close();
                }
@@ -1235,39 +1189,13 @@ void lsPrint(SdFile * theDir, const char * cmdStr, byte flags, byte indent)
    }
 }
 
-/*
- * NAME:
-
- * PARAMETERS:
- *  SdFile * theDir = the directory to list (assumed opened)
- *  char * cmdStr = the command line file/directory string (with possible wildcards)
- *  byte flags = the inclusive OR of
- *                  LS_SIZE - print the file size
- *                  LS_R - recursively list subdirectories
- *  byte indent = amount of space before file name
- *                (used for recursive list to indicate subdirectory level)
- *
- * WHAT:
- *  List directory's next contents to serial port.
- *
- *  Wildcard support rules:
- *    Wildcard characters ('*', '?') only apply to the selection of filenames to
- *    list, not to the listing of directory or subdirectory names. All directory
- *    and subdirectory names are always listed.
- *
- * RETURN VALUES:
- *  byte = WAS_EOF - EOF, WAS_FILE - normal file, or WAS_SUBDIR - subdirectory
- *
- * SPECIAL CONSIDERATIONS:
- *  None.
- */
 byte lsPrintNext(SdFile * theDir, const char * cmdStr, byte flags, byte indent)
 {
   byte pos = 0;           // output position
   byte open_stat;         // file open status
   byte status;            // return status
   SdFile tempFile;
-  char fname[max_file_string_len];
+  char fname[setting::max_file_string_len];
 
   // Find next available object to display in the specified directory
   while ((open_stat = tempFile.openNext(theDir, O_READ))){
@@ -1290,21 +1218,18 @@ byte lsPrintNext(SdFile * theDir, const char * cmdStr, byte flags, byte indent)
     return print_tree_status::eof;     // nothing more in this (sub)directory
   }
 
-  // output the file or directory name
-  // indented for dir level
+  // output the file or directory name indented for dir level
   for (byte i = 0; i < indent; i++){
     NewSerial.write(' ');
   }
-
   // print name
   pos += NewSerial.print(fname);
-
   if (tempFile.isSubDir()){
     pos += NewSerial.write('/');    // subdirectory indicator
   }
   // print size if requested (files only)
   if (tempFile.isFile() && (flags & LS_SIZE)){
-    while (pos++ < max_file_string_len +1){
+    while (pos++ < setting::max_file_string_len +1){
       NewSerial.write(' ');
     }
     NewSerial.write(' ');           // ensure at least 1 separating space
@@ -1313,11 +1238,4 @@ byte lsPrintNext(SdFile * theDir, const char * cmdStr, byte flags, byte indent)
   NewSerial.writeln();
   tempFile.close();
   return status;
-}
-
-//Given a pin, it will toggle it from high to low or vice versa
-void toggleLED(byte pinNumber)
-{
-  if(digitalRead(pinNumber)) digitalWrite(pinNumber, LOW);
-  else digitalWrite(pinNumber, HIGH);
 }

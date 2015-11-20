@@ -40,11 +40,11 @@ EEPROM_PATH = $(ARDUINO_PATH)libraries/EEPROM/
 #arduino_cpp_objects = CDC.o HardwareSerial.o Print.o Stream.o  WString.o main.o new.o 
 arduino_cpp_objects = CDC.o  Print.o main.o new.o
 arduino_c_objects = WInterrupts.o wiring.o wiring_digital.o
-local_objects = apm_log.o
+local_objects = apm_log.o   
 sdfat_objects = istream.o  Sd2Card.o     SdFat.o      SdFile.o    SdVolume.o \
 ostream.o  SdBaseFile.o  SdFatUtil.o  SdStream.o
 
-OBJECTS = $(arduino_cpp_objects) $(arduino_c_objects) $(local_objects) $(sdfat_objects) eeprom.o serial_port.o
+OBJECTS = $(arduino_cpp_objects) $(arduino_c_objects) $(local_objects) $(sdfat_objects) EEPROM.o SerialPort.o
 
 INCLUDES =  -I$(ARDUINO_SRC_PATH) -I$(ARDUINO_EXTRA_PATH) \
 -I$(SDFAT_PATH) -I$(SERIALPORT_PATH) -I$(EEPROM_PATH)
@@ -101,10 +101,10 @@ $(ELFFILE) : $(OBJECTS)
 	$(CC) -o $@ $(LFLAGS) $(OBJECTS)
 	$(SIZ) -A $(ELFFILE)
 
-eeprom.o : $(EEPROM_PATH)EEPROM.cpp
+EEPROM.o : $(EEPROM_PATH)EEPROM.cpp
 	$(CC) $(CFLAGS_CPP) -c $< -o $@
 
-serial_port.o : $(SERIALPORT_PATH)SerialPort.cpp
+SerialPort.o : $(SERIALPORT_PATH)SerialPort.cpp
 	$(CC) $(CFLAGS_CPP) -c $< -o $@
 
 clean:
