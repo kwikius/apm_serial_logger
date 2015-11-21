@@ -65,17 +65,15 @@ namespace {
    SdFile currentDirectory;
 
    static char folderTree[setting::max_folder_depth][12];
-
    //Used for wild card delete and search
-   struct command_arg_t
-   {
+   struct command_arg_t {
      const char* arg; //Points to first character in command line argument
      byte arg_length; //Length of command line argument
    };
 
    command_arg_t cmd_arg[setting::max_commandline_args];
    constexpr byte feedback_mode = (setting::echo | setting::extended_info);
-}
+
 
 void setup_sd_and_fat()
 {
@@ -86,6 +84,10 @@ void setup_sd_and_fat()
   if (!currentDirectory.openRoot(&volume)) systemError(error_code::root_init);
 }
 
+ void command_shell();
+
+} // namespace 
+
 #include "setup.cpp"
 
 void loop(void)
@@ -93,6 +95,8 @@ void loop(void)
   command_shell();
  // while(1); //We should never get this far
 }
+
+namespace {
 
 void power_saving_mode()
 {
@@ -107,9 +111,10 @@ void power_saving_mode()
 
 }
 
+
 #include "append_file.cpp"
 
-byte command_init()
+bool command_init()
 {
    currentDirectory.close();
    //Open the root directory
@@ -117,11 +122,10 @@ byte command_init()
       systemError(error_code::root_init);
    }
    memset(folderTree, 0, sizeof(folderTree)); //Clear folder tree
-
-   return 1;
+   return true;
 }
 
-uint8_t command_ls()
+bool command_ls()
 {
    char * command_arg = nullptr;
    if (count_cmd_args() == 1)  {
@@ -135,41 +139,42 @@ uint8_t command_ls()
      strupr(command_arg);
    }
    lsPrint(&currentDirectory, command_arg, LS_SIZE | LS_R, 0);
-   return 1;
+   return true;
 }
 
-byte command_md()
+bool command_md()
 {
    //Argument 2: Directory name
    char * command_arg = get_cmd_arg(1);
    if(command_arg == 0){
-     return 0;
+     return false;
    }
    SdFile newDirectory;
    if (!newDirectory.makeDir(&currentDirectory, command_arg)) {
-     if ((feedback_mode & setting::extended_info) > 0)
-     {
+     if ((feedback_mode & setting::extended_info) > 0){
        NewSerial.print(F("error creating directory: "));
        NewSerial.println(command_arg);
      }
-     return 0;
+     return false;
    }else{
-     return 1;
+     return true;
    }
 }
+
 #include "command_rm.cpp"
 #include "command_read.cpp"
 #include "command_write.cpp"
 #include "command_size.cpp"
 #include "command_cd.cpp"
+#include "command_disk.cpp"
+#include "command_new.cpp"
+#include "command_append.cpp"
+#include "command_pwd.cpp"
 
 void command_shell(void)
 {
-  //Provide a simple shell
   char buffer[30];
- // byte tmp_var;
- // SdFile tempFile;
-  byte command_succeeded = 1;
+  bool command_succeeded = true;
 #if RAM_TESTING == 1
   printRam(); //Print the available RAM
 #endif
@@ -186,7 +191,7 @@ void command_shell(void)
       command_succeeded = 1;
       continue;
     }
-    command_succeeded = 0;
+    command_succeeded = false;
     //Argument 1: The actual command
     char* command_arg = get_cmd_arg(0);
 //-------------------------------------------------
@@ -212,16 +217,7 @@ void command_shell(void)
     }
 //----------------------------------------------------------------------
     else if(strcmp_P(command_arg, PSTR("cd")) == 0){
-#if 0
-      //Argument 2: Directory name
-      command_arg = get_cmd_arg(1);
-      if(command_arg == 0){
-        continue;
-      }
-      command_succeeded = gotoDir(command_arg);
-#else
       command_succeeded = command_cd();
-#endif
     }
 //---------------------------------------------------------
     else if(strcmp_P(command_arg, PSTR("read")) == 0) {
@@ -237,128 +233,33 @@ void command_shell(void)
     }
 //----------------------------------------------------------
     else if(strcmp_P(command_arg, PSTR("disk")) == 0) {
-      //Print card type
-      NewSerial.print(F("\nCard type: "));
-      switch(card.type()) {
-      case SD_CARD_TYPE_SD1:
-        NewSerial.println(F("SD1"));
-        break;
-      case SD_CARD_TYPE_SD2:
-        NewSerial.println(F("SD2"));
-        break;
-      case SD_CARD_TYPE_SDHC:
-        NewSerial.println(F("SDHC"));
-        break;
-      default:
-        NewSerial.println(F("Unknown"));
-      }
-
-      //Print card information
-      cid_t cid;
-      if (!card.readCID(&cid)) {
-        NewSerial.print(F("readCID failed"));
-        continue;
-      }
-
-      NewSerial.print(F("Manufacturer ID: "));
-      NewSerial.println(cid.mid, HEX);
-
-      NewSerial.print(F("OEM ID: "));
-      NewSerial.print(cid.oid[0]);
-      NewSerial.println(cid.oid[1]);
-
-      NewSerial.print(F("Product: "));
-      for (byte i = 0; i < 5; i++) {
-        NewSerial.print(cid.pnm[i]);
-      }
-
-      NewSerial.print(F("\n\rVersion: "));
-      NewSerial.print(cid.prv_n, DEC);
-      NewSerial.print(F("."));
-      NewSerial.println(cid.prv_m, DEC);
-
-      NewSerial.print(F("Serial number: "));
-      NewSerial.println(cid.psn);
-
-      NewSerial.print(F("Manufacturing date: "));
-      NewSerial.print(cid.mdt_month);
-      NewSerial.print(F("/"));
-      NewSerial.println(2000 + cid.mdt_year_low + (cid.mdt_year_high <<4));
-
-      csd_t csd;
-      uint32_t cardSize = card.cardSize();
-      if (cardSize == 0 || !card.readCSD(&csd)) {
-        NewSerial.println(F("readCSD failed"));
-        continue;
-      }
-      NewSerial.print(F("Card Size: "));
-      cardSize /= 2; //Card size is coming up as double what it should be? Don't know why. Dividing it by 2 to correct.
-      NewSerial.print(cardSize);
-      //After division
-      //7761920 = 8GB card
-      //994816 = 1GB card
-      NewSerial.println(F(" KB"));
-      command_succeeded = 1;
-
+      command_succeeded = command_disk();
     }
 //--------------------------RESET--------------------------
-    //Reset the AVR
     else if(strcmp_P(command_arg, PSTR("reset")) == 0) {
       Reset_AVR();
     }
 //--------------------------NEW -----------------------------
     //Create new file
     else if(strcmp_P(command_arg, PSTR("new")) == 0) {
-      //Argument 2: File name
-      command_arg = get_cmd_arg(1);
-      if(command_arg == 0){
-        continue;
-      }
-      SdFile tempFile;
-      //Try to open file, if fail (file doesn't exist), then break
-      if (tempFile.open(&currentDirectory, command_arg, O_CREAT | O_EXCL | O_WRITE)) {//Will fail if file already exsists
-        tempFile.close(); //Everything is good, Close this new file we just opened
-        command_succeeded = 1;
-      }else{
-        if ((feedback_mode & setting::extended_info) > 0) {
-          NewSerial.print(F("Error creating file: "));
-          NewSerial.println(command_arg);
-        }
-      }
+      command_succeeded = command_new();
     }
 //-------------------------APPEND ------------------------------------
     //Append to a current file
     else if(strcmp_P(command_arg, PSTR("append")) == 0){
-      //Argument 2: File name
-      //Find the end of a current file and begins writing to it
-      //Ends only when the user inputs Ctrl+z (ASCII 26)
-      command_arg = get_cmd_arg(1);
-      if(command_arg == 0){
-        continue;
-      }
-      //append_file: Uses circular buffer to capture full stream of text and append to file
-      command_succeeded = append_file(command_arg);
+      command_succeeded = command_append();
     }
 //---------------------------------------------------------
     else if(strcmp_P(command_arg, PSTR("pwd")) == 0) {
-      NewSerial.print(F(".\\"));
-      byte const tmp_var = getNextFolderTreeIndex();
-      for (byte i = 0; i < tmp_var; i++){
-         NewSerial.print(folderTree[i]);
-         if (i < tmp_var-1) {
-            NewSerial.print(F("\\"));
-         }
-      }
-      NewSerial.println();
-      command_succeeded = 1;
+      command_succeeded = command_pwd();
     }
 //---------------------------------------------------------
-    else
-    {
+    else {
       if ((feedback_mode & setting::extended_info) > 0) {
         NewSerial.print(F("unknown command: "));
         NewSerial.println(command_arg);
       }
+      command_succeeded = false;
     }
 //--------------------------------------------------------
   }
@@ -366,10 +267,11 @@ void command_shell(void)
   NewSerial.print(F("Exiting: closing down\n"));
 }
 
+} // namespace
+
 //Reads a line until the \n enter character is found
 byte read_line(char* buffer, byte buffer_length)
 {
-
   memset(buffer, 0, buffer_length); 
 
   byte read_length = 0;
@@ -427,10 +329,8 @@ byte read_line(char* buffer, byte buffer_length)
       ++read_length;
     }
   }
-
   //Split the command line into arguments
   split_cmd_line_args(buffer, buffer_length);
-
   return read_length;
 }
 
@@ -441,47 +341,48 @@ int8_t getNextFolderTreeIndex()
     if (strlen(folderTree[i]) == 0)
       return i;
 
-  if (i >= setting::max_folder_depth)
+  if (i >= setting::max_folder_depth){
     i = -1;
-
+  }
   return i;
 }
 
-byte gotoDir(const char *dir)
+bool gotoDir(const char *dir)
 {
   SdFile subDirectory;
-  byte tmp_var = 0;
-
+  bool result = false;
   //Goto parent directory
   //@NOTE: This is a fix to make this work. Should be replaced with
   //proper handling. Limitation: setting::max_folder_depth subfolders
   //ERROR  if (strcmp_P(dir, F("..")) == 0) {
   if (strcmp_P(dir, PSTR("..")) == 0) {
-    tmp_var = 1;
+    result = true;
     //close file system
     currentDirectory.close();
     // open the root directory
-    if (!currentDirectory.openRoot(&volume)) systemError(error_code::root_init);
+    if (!currentDirectory.openRoot(&volume)) {
+         systemError(error_code::root_init);
+    }
     int8_t index = getNextFolderTreeIndex() - 1;
-    if (index >= 0)
-    {
-      for (int8_t iTemp = 0; iTemp < index; iTemp++)
-      {
-        if (!(tmp_var = subDirectory.open(&currentDirectory, folderTree[iTemp], O_READ)))
-          break;
-
+    if (index >= 0) {
+      for (int8_t iTemp = 0; iTemp < index; iTemp++){
+        result = subDirectory.open(&currentDirectory, folderTree[iTemp], O_READ);
+        if (!result){
+            break;
+        }
         currentDirectory = subDirectory; //Point to new directory
         subDirectory.close();
       }
       memset(folderTree[index], 0, 11);
     }
-    if (((feedback_mode & setting::extended_info) > 0) && (tmp_var == 0))
+    if (((feedback_mode & setting::extended_info) > 0) && (result == false))
     {
       NewSerial.print(F("cannot cd to parent directory: "));
       NewSerial.println(dir);
     }
   }else {
-    if (!(tmp_var = subDirectory.open(&currentDirectory, dir, O_READ))) {
+    result = subDirectory.open(&currentDirectory, dir, O_READ);
+    if (!result) {
       if ((feedback_mode & setting::extended_info) > 0){
         NewSerial.print(F("directory not found: "));
         NewSerial.println(dir);
@@ -489,14 +390,15 @@ byte gotoDir(const char *dir)
     }else {
       currentDirectory = subDirectory; //Point to new directory
       int8_t index = getNextFolderTreeIndex();
-      if (index >= 0)
+      if (index >= 0){
         strncpy(folderTree[index], dir, 11);
+      }
     }
   }
-  return tmp_var;
+  return result;
 }
 
-byte print_menu(void)
+bool print_menu(void)
 {
   NewSerial.println(F("OpenLog v3.3"));
   NewSerial.println(F("Basic commands:"));
@@ -512,7 +414,7 @@ byte print_menu(void)
   NewSerial.println(F("size <file>\t\t: show size of <file>"));
   NewSerial.println(F("disk\t\t\t: Shows card info"));
   NewSerial.println(F("reset\t\t\t: reset"));
-  return 1;
+  return true;
 }
 
 //A rudimentary way to convert a string to a long 32 bit integer
@@ -530,7 +432,6 @@ uint32_t strtolong(const char* str)
 byte count_cmd_args(void)
 {
   byte count = 0;
- 
   for( byte i = 0; i < setting::max_commandline_args; i++){
     if((cmd_arg[i].arg != 0) && (cmd_arg[i].arg_length > 0)){
       count++;
@@ -545,19 +446,20 @@ char general_buffer[30]; //Needed for command shell
 char* get_cmd_arg(byte index)
 {
   memset(general_buffer, 0, sizeof(general_buffer));
-  if (index < setting::max_commandline_args)
-    if ((cmd_arg[index].arg != 0) && (cmd_arg[index].arg_length > 0))
+  if (index < setting::max_commandline_args){
+    if ((cmd_arg[index].arg != 0) && (cmd_arg[index].arg_length > 0)){
       return strncpy(general_buffer, cmd_arg[index].arg, MIN(sizeof(general_buffer), cmd_arg[index].arg_length));
-
-  return 0;
+    }
+  }
+  return nullptr;
 }
+
 
 //Safe adding of command line arguments
 void add_cmd_arg(const char* buffer, byte buffer_length)
 {
   byte count = count_cmd_args();
-  if (count < setting::max_commandline_args)
-  {
+  if (count < setting::max_commandline_args){
     cmd_arg[count].arg = buffer;
     cmd_arg[count].arg_length = buffer_length;
   }
@@ -590,7 +492,6 @@ byte split_cmd_line_args(const char* buffer, byte buffer_length)
     }
     arg_index_end++;
   }
-
   //Return the number of available command line arguments
   return count_cmd_args();
 }
@@ -618,9 +519,8 @@ void removeErrorCallback(const char* fileName)
 //Wildcard string compare.
 //Written by Jack Handy - jakkhandy@hotmail.com
 //http://www.codeproject.com/KB/string/wildcmp.aspx
-byte wildcmp(const char* wild, const char* string)
+bool wildcmp(const char* wild, const char* string)
 {
-
   const char *cp = 0;
   const char *mp = 0;
 
@@ -667,3 +567,5 @@ void blink_error(byte ERROR_TYPE)
     delay(2000);
   }
 }
+
+

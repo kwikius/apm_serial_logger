@@ -1,18 +1,18 @@
 
 
-byte command_read()
+bool command_read()
 {
       //Argument 2: File name
       char* command_arg = get_cmd_arg(1);
       if(command_arg == 0){
-        return 0;
+        return false;
       }
 
       SdFile tempFile;
       //search file in current directory and open it
       if (!tempFile.open(&currentDirectory, command_arg, O_READ)) {
         // couldnt open
-        return 0;
+        return false;
       }
 
       command_arg = get_cmd_arg(2);
@@ -23,7 +23,7 @@ byte command_read()
           if(!tempFile.seekSet(offset)) {
             // error seeking
             tempFile.close();
-            return 0;
+            return false;
           }
         }
       }
@@ -82,5 +82,5 @@ byte command_read()
       if ((feedback_mode & setting::end_marker) == 0){
         NewSerial.println();
       }
-      return 1;
+      return true;
 }

@@ -3,14 +3,13 @@
     // "rm <subfolder>" removes the <subfolder> only if its empty
     // "rm <filename>" removes the <filename>
 //-------------------------------------------------------------
-byte command_rm()
+bool command_rm()
 {
    //Argument 2: Remove option or file name/subdirectory to remove
    char* command_arg = get_cmd_arg(1);
    if(command_arg == 0){
-     return 0;;
+     return false;
    }
-
    SdFile tempFile;
    //Argument 2: Remove subfolder recursively?
    if ((count_cmd_args() == 3) && (strcmp_P(command_arg, PSTR("-rf")) == 0)) {
@@ -21,7 +20,7 @@ byte command_rm()
        tempFile.close();
        return tmp_var;
      }else{
-      return 0;
+       return false;
      }
    }
    
@@ -66,11 +65,7 @@ byte command_rm()
      NewSerial.print(filesDeleted);
      NewSerial.println(F(" file(s) deleted"));
    }
-   if (filesDeleted > 0){
-     return 1;
-   }else{
-     return 0;
-   }
+   return (filesDeleted > 0);
 }
 
 //---------------------------------------------------------
