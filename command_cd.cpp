@@ -6,6 +6,6 @@ bool command_cd()
    if(command_arg == 0){
      return false;
    }else{
-      return gotoDir(command_arg) != 0 ;
+      return change_to_dir(command_arg) != 0 ;
    }
 }

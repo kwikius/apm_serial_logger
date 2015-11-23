@@ -1,7 +1,10 @@
 #ifndef APM_LOG_LOG_H_INCLUDED
 #define APM_LOG_LOG_H_INCLUDED
 
-#include <SdFat.h> //We do not use the built-in SD.h file because it calls Serial.print
+//#include <SdFat.h> //We do not use the built-in SD.h file because it calls Serial.print
+#include <SdFile.h>
+#include <SdVolume.h>
+#include <Sd2Card.h>
 
 int freeRam();
 void blink_error(unsigned char ERROR_TYPE);
@@ -18,7 +21,7 @@ void toggleLED(unsigned char pinNumber);
 //void writeBaud(long uartRate);
 //long readBaud(void);
 void systemError(byte error_type);
-void record_config_file(void);
+//void record_config_file(void);
 uint32_t strtolong(const char* str);
 unsigned char read_line(char* buffer, unsigned char buffer_length);
 char* get_cmd_arg(unsigned char index);
@@ -27,7 +30,7 @@ bool print_menu(void);
 void system_menu(void);
 unsigned char count_cmd_args(void);
 bool wildcmp(const char* wild, const char* string);
-bool gotoDir(const char *dir);
+bool change_to_dir(const char *dir);
 bool is_number(const char* buffer, unsigned char buffer_length);
 unsigned char read_line(char* buffer, unsigned char buffer_length);
 unsigned char split_cmd_line_args(const char* buffer, unsigned char buffer_length);

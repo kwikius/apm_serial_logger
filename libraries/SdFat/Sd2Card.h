@@ -144,7 +144,7 @@ uint8_t const  SPI_MISO_PIN = MISO_PIN;
 uint8_t const  SPI_SCK_PIN = SCK_PIN;
 #endif  // SS
 #else  // SOFTWARE_SPI
-
+#warning "using soft spi"
 /** SPI chip select pin */
 uint8_t const SD_CHIP_SELECT_PIN = SOFT_SPI_CS_PIN;
 /** SPI Master Out Slave In pin */

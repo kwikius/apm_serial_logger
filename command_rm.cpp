@@ -10,14 +10,14 @@ bool command_rm()
    if(command_arg == 0){
      return false;
    }
-   SdFile tempFile;
+  // SdFile file;
    //Argument 2: Remove subfolder recursively?
    if ((count_cmd_args() == 3) && (strcmp_P(command_arg, PSTR("-rf")) == 0)) {
      //Remove the subfolder
-     if (tempFile.open(&currentDirectory, get_cmd_arg(2), O_READ))
+     if (file.open(&currentDirectory, get_cmd_arg(2), O_READ))
      {
-       byte tmp_var = tempFile.rmRfStar();
-       tempFile.close();
+       byte tmp_var = file.rmRfStar();
+       file.close();
        return tmp_var;
      }else{
        return false;
@@ -25,18 +25,18 @@ bool command_rm()
    }
    
    //Argument 2: Remove subfolder if empty or remove file
-   if (tempFile.open(&currentDirectory, command_arg, O_READ)){
+   if (file.open(&currentDirectory, command_arg, O_READ)){
      byte tmp_var = 0;
-     if (tempFile.isDir() || tempFile.isSubDir()){
-       tmp_var = tempFile.rmDir();
+     if (file.isDir() || file.isSubDir()){
+       tmp_var = file.rmDir();
      }
      else{
-       tempFile.close();
-       if (tempFile.open(&currentDirectory, command_arg, O_WRITE)){
-         tmp_var = tempFile.remove();
+       file.close();
+       if (file.open(&currentDirectory, command_arg, O_WRITE)){
+         tmp_var = file.remove();
        }
      }
-     tempFile.close();
+     file.close();
      return tmp_var;
    }
 
@@ -46,19 +46,19 @@ bool command_rm()
    char fname[13];
    strupr(command_arg);
    currentDirectory.rewind();
-   while (tempFile.openNext(&currentDirectory, O_READ)){ //Step through each object in the current directory
-     if (!tempFile.isDir() && !tempFile.isSubDir()) { // Remove only files 
-       if (tempFile.getFilename(fname)) { // Get the filename of the object we're looking at
+   while (file.openNext(&currentDirectory, O_READ)){ //Step through each object in the current directory
+     if (!file.isDir() && !file.isSubDir()) { // Remove only files 
+       if (file.getFilename(fname)) { // Get the filename of the object we're looking at
          if (wildcmp(command_arg, fname)) { // See if it matches the wildcard 
-           tempFile.close();
-           tempFile.open(&currentDirectory, fname, O_WRITE);  // Re-open for WRITE to be delete
-           if (tempFile.remove()) {// Remove this file
+           file.close();
+           file.open(&currentDirectory, fname, O_WRITE);  // Re-open for WRITE to be delete
+           if (file.remove()) {// Remove this file
              ++filesDeleted;
            }
          }
        }
      }
-     tempFile.close();
+     file.close();
    }
 
    if ((feedback_mode & setting::extended_info) > 0) {

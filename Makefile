@@ -21,6 +21,7 @@
 ARDUINO_PATH = /home/andy/arduino-1.0.4/
 #QUAN_INCLUDE_PATH = /home/andy/website/quan-trunk/
 ARDUINO_PORT = /dev/ttyUSB0
+QUAN_PATH = /home/andy/website/quan-trunk/
 ###########################################################
 
 ARDUINO_MCU = atmega328p
@@ -47,7 +48,7 @@ ostream.o  SdBaseFile.o  SdFatUtil.o  SdStream.o
 OBJECTS = $(arduino_cpp_objects) $(arduino_c_objects) $(local_objects) $(sdfat_objects) EEPROM.o SerialPort.o
 
 INCLUDES =  -I$(ARDUINO_SRC_PATH) -I$(ARDUINO_EXTRA_PATH) \
--I$(SDFAT_PATH) -I$(SERIALPORT_PATH) -I$(EEPROM_PATH)
+-I$(SDFAT_PATH) -I$(SERIALPORT_PATH) -I$(EEPROM_PATH) -I$(QUAN_PATH)
 
 OUTPUT_FILENAME = apm_log
 ELFFILE =     $(OUTPUT_FILENAME).elf
@@ -94,7 +95,7 @@ $(arduino_c_objects) : %.o : $(ARDUINO_SRC_PATH)%.c
 $(sdfat_objects) : %.o : $(SDFAT_PATH)%.cpp
 	$(CC) $(CFLAGS_CPP) -c $< -o $@
 
-$(local_objects) : %.o : %.cpp
+$(local_objects) : %.o : %.cpp packet_mode.cpp command_write.cpp command_cd.cpp 
 	$(CC) $(CFLAGS_CPP) -c $< -o $@
 
 $(ELFFILE) : $(OBJECTS)

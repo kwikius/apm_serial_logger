@@ -15,7 +15,7 @@ All we ask is that you include attribution of 'Based on OpenLog by SparkFun'.
 #include "log.h"
 #include "serial_port.h"
 #include "error_code.hpp"
-
+#include <quan/min.hpp>
 #define DEBUG  0
 //#define RAM_TESTING  1 //On
 #define RAM_TESTING  0 //Off
@@ -24,6 +24,7 @@ All we ask is that you include attribution of 'Based on OpenLog by SparkFun'.
 #include "system_error.cpp"
 #include "serial_port.cpp"
 #include "free_ram.cpp"
+
 namespace {
    
    //#define Reset_AVR() wdt_enable(WDTO_1S); while(1) {} //Correct way of resetting the ATmega, but doesn't work with 
@@ -33,7 +34,7 @@ namespace {
    struct setting{
       static constexpr long      baud_rate = 9600; //This is the baud rate that the system runs at, default is 9600. Can be 1,200 to 1,000,000
       static constexpr byte      escape_character = 0x1A; //This is the ASCII character we look for to break logging, default is ctrl+z
-      static constexpr byte      num_escapes = 3; //Number of escape chars before break logging, default is 3
+      static constexpr byte      num_escapes = 3; //Number of escape chars before break logging, default is 3, dont make 0 atm
       static constexpr uint8_t   max_commandline_args = 5;
       static constexpr uint8_t   max_folder_depth = 2;
       static constexpr uint16_t  max_file_string_len = 13;    
@@ -63,6 +64,7 @@ namespace {
    Sd2Card card;
    SdVolume volume;
    SdFile currentDirectory;
+   SdFile file;
 
    static char folderTree[setting::max_folder_depth][12];
    //Used for wild card delete and search
@@ -74,14 +76,19 @@ namespace {
    command_arg_t cmd_arg[setting::max_commandline_args];
    constexpr byte feedback_mode = (setting::echo | setting::extended_info);
 
-
 void setup_sd_and_fat()
 {
   //Setup SD & FAT
-  if (!card.init(SPI_FULL_SPEED)) systemError(error_code::card_init);
-  if (!volume.init(&card)) systemError(error_code::volume_init);
+  if (!card.init(SPI_FULL_SPEED)) {
+      systemError(error_code::card_init);
+  }
+  if (!volume.init(&card)) {
+   systemError(error_code::volume_init);
+  }
   currentDirectory.close(); //We close the cD before opening root. This comes from QuickStart example. Saves 4 bytes.
-  if (!currentDirectory.openRoot(&volume)) systemError(error_code::root_init);
+  if (!currentDirectory.openRoot(&volume)) {
+      systemError(error_code::root_init);
+  }
 }
 
  void command_shell();
@@ -111,8 +118,7 @@ void power_saving_mode()
 
 }
 
-
-#include "append_file.cpp"
+#include "write_text_file.cpp"
 
 bool command_init()
 {
@@ -161,14 +167,18 @@ bool command_md()
    }
 }
 
+} // ~namespace
+
+#include "packet_mode.cpp"
+
+namespace {
+
 #include "command_rm.cpp"
 #include "command_read.cpp"
 #include "command_write.cpp"
 #include "command_size.cpp"
 #include "command_cd.cpp"
 #include "command_disk.cpp"
-#include "command_new.cpp"
-#include "command_append.cpp"
 #include "command_pwd.cpp"
 
 void command_shell(void)
@@ -179,9 +189,7 @@ void command_shell(void)
   printRam(); //Print the available RAM
 #endif
   while(true){
-    if ((feedback_mode & setting::end_marker) > 0){
-      NewSerial.print(F("\0x1A")); // Ctrl+Z ends the data and marks the start of result
-    }
+
     if (command_succeeded == 0){
       NewSerial.print(F("!"));
     }
@@ -194,9 +202,11 @@ void command_shell(void)
     command_succeeded = false;
     //Argument 1: The actual command
     char* command_arg = get_cmd_arg(0);
-//-------------------------------------------------
-    //Execute command
-    if(strcmp_P(command_arg, PSTR("init")) == 0){
+
+    if (strcmp_P(command_arg, PSTR("packet-mode")) == 0){
+       command_succeeded = packet_mode();
+    }
+    else if(strcmp_P(command_arg, PSTR("init")) == 0){
       command_succeeded = command_init();
     }
 //---------------------------------------------------------------
@@ -225,7 +235,7 @@ void command_shell(void)
     }
 //--------------------------------------------------------------------
     else if(strcmp_P(command_arg, PSTR("write")) == 0){
-      command_succeeded = command_write(buffer, sizeof(buffer));
+      command_succeeded = command_write();
     }
 //-------------------------------------------------------
     else if(strcmp_P(command_arg, PSTR("size")) == 0) {
@@ -269,7 +279,8 @@ void command_shell(void)
 
 } // namespace
 
-//Reads a line until the \n enter character is found
+//Reads a line until the \r enter character is found
+// uses commnd_shell fun buffer
 byte read_line(char* buffer, byte buffer_length)
 {
   memset(buffer, 0, buffer_length); 
@@ -347,48 +358,46 @@ int8_t getNextFolderTreeIndex()
   return i;
 }
 
-bool gotoDir(const char *dir)
+bool change_to_dir(const char *dir)
 {
-  SdFile subDirectory;
+  SdFile newdir;
   bool result = false;
   //Goto parent directory
   //@NOTE: This is a fix to make this work. Should be replaced with
   //proper handling. Limitation: setting::max_folder_depth subfolders
   //ERROR  if (strcmp_P(dir, F("..")) == 0) {
+
   if (strcmp_P(dir, PSTR("..")) == 0) {
     result = true;
-    //close file system
     currentDirectory.close();
-    // open the root directory
     if (!currentDirectory.openRoot(&volume)) {
-         systemError(error_code::root_init);
+       systemError(error_code::root_init);
     }
     int8_t index = getNextFolderTreeIndex() - 1;
     if (index >= 0) {
       for (int8_t iTemp = 0; iTemp < index; iTemp++){
-        result = subDirectory.open(&currentDirectory, folderTree[iTemp], O_READ);
+        result = newdir.open(&currentDirectory, folderTree[iTemp], O_READ);
         if (!result){
             break;
         }
-        currentDirectory = subDirectory; //Point to new directory
-        subDirectory.close();
+        currentDirectory = newdir; //Point to new directory
+        newdir.close();
       }
       memset(folderTree[index], 0, 11);
     }
-    if (((feedback_mode & setting::extended_info) > 0) && (result == false))
-    {
+    if (((feedback_mode & setting::extended_info) > 0) && (result == false)){
       NewSerial.print(F("cannot cd to parent directory: "));
       NewSerial.println(dir);
     }
   }else {
-    result = subDirectory.open(&currentDirectory, dir, O_READ);
+    result = newdir.open(&currentDirectory, dir, O_READ);
     if (!result) {
       if ((feedback_mode & setting::extended_info) > 0){
         NewSerial.print(F("directory not found: "));
         NewSerial.println(dir);
       }
     }else {
-      currentDirectory = subDirectory; //Point to new directory
+      currentDirectory = newdir; //Point to new directory
       int8_t index = getNextFolderTreeIndex();
       if (index >= 0){
         strncpy(folderTree[index], dir, 11);
@@ -442,18 +451,16 @@ byte count_cmd_args(void)
 
 //Safe index handling of command line arguments
 char general_buffer[30]; //Needed for command shell
-#define MIN(a,b) ((a)<(b))?(a):(b)
 char* get_cmd_arg(byte index)
 {
   memset(general_buffer, 0, sizeof(general_buffer));
   if (index < setting::max_commandline_args){
     if ((cmd_arg[index].arg != 0) && (cmd_arg[index].arg_length > 0)){
-      return strncpy(general_buffer, cmd_arg[index].arg, MIN(sizeof(general_buffer), cmd_arg[index].arg_length));
+      return strncpy(general_buffer, cmd_arg[index].arg, quan::min(sizeof(general_buffer), cmd_arg[index].arg_length));
     }
   }
   return nullptr;
 }
-
 
 //Safe adding of command line arguments
 void add_cmd_arg(const char* buffer, byte buffer_length)
@@ -567,5 +574,3 @@ void blink_error(byte ERROR_TYPE)
     delay(2000);
   }
 }
-
-

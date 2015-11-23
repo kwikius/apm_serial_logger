@@ -7,21 +7,11 @@ bool command_size()
    if(command_arg == 0){
      return 0;
    }
-   SdFile tempFile;
-   bool result = false;
-   //search file in current directory and open it
-   if (tempFile.open(&currentDirectory, command_arg, O_READ)) {
-     NewSerial.print(tempFile.fileSize());
-     tempFile.close();
-     result = true;
+   if (file.open(&currentDirectory, command_arg, O_READ)) {
+     NewSerial.print(file.fileSize());
+     file.close();
+     return true;
    }else {
-      if ((feedback_mode & setting::extended_info) > 0){
-       NewSerial.print(F("-1")); //Indicate no file is found
-      }
-      result = false;
+     return  false;
    }
-   if ((feedback_mode & setting::end_marker) == 0){
-     NewSerial.println();
-   }
-   return result;
 }

@@ -3,7 +3,7 @@
 #include <iostream>
 
 /*
-
+ already in cmmand line
 */
 
 bool connect(quan::serial_port & sp)
@@ -82,14 +82,14 @@ int main()
      std::cout << "fail\n";
    }
 
-   uint8_t buf [] = {0x1a,0x1a,0x1a};
-   sp.write(buf,3);
-
-   while (sp.in_avail(quan::time::s{0.1})){
-      char ch;
-      sp.read((unsigned char*) &ch,1);
-      std::cout << ch ;
-   }
+//   uint8_t buf [] = {0x1a,0x1a,0x1a};
+//   sp.write(buf,3);
+//
+//   while (sp.in_avail(quan::time::s{0.1})){
+//      char ch;
+//      sp.read((unsigned char*) &ch,1);
+//      std::cout << ch ;
+//   }
    sp.write("ls\r");
    while (sp.in_avail(quan::time::s{0.1})){
       char ch;

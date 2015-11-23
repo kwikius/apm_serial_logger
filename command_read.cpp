@@ -8,10 +8,8 @@ bool command_read()
         return false;
       }
 
-      SdFile tempFile;
       //search file in current directory and open it
-      if (!tempFile.open(&currentDirectory, command_arg, O_READ)) {
-        // couldnt open
+      if (!file.open(&currentDirectory, command_arg, O_READ)) {
         return false;
       }
 
@@ -20,9 +18,9 @@ bool command_read()
       if (command_arg != 0) {
         if ( is_number(command_arg, strlen(command_arg))) {
           int32_t offset = strtolong(command_arg);
-          if(!tempFile.seekSet(offset)) {
+          if(!file.seekSet(offset)) {
             // error seeking
-            tempFile.close();
+            file.close();
             return false;
           }
         }
@@ -48,9 +46,9 @@ bool command_read()
 
       //Print file contents from current seek position to the end (readAmount)
       uint32_t readSpot = 0;
-    //  while ( (int16_t v = tempFile.read()) >= 0) {
+    //  while ( (int16_t v = file.read()) >= 0) {
         for(;;){
-         int16_t v = tempFile.read();
+         int16_t v = file.read();
          if ( v >= 0){
            //file.read() returns a 16 bit character. We want to be able to print extended ASCII
            //So we need 8 bit unsigned.
@@ -77,7 +75,7 @@ bool command_read()
             break;
          }
       }
-      tempFile.close();
+      file.close();
 
       if ((feedback_mode & setting::end_marker) == 0){
         NewSerial.println();
